@@ -1,0 +1,115 @@
+%% 关键流程时序图 · money_time_ledger
+%% 摘自 02-arch.md，供实现与评审直接使用
+
+sequenceDiagram
+  autonumber
+  actor U as 用户
+  participant P as PageUI
+  participant AG as AggregateService
+  participant RP as LedgerRepo
+  participant IP as ImportPipeline
+  participant PS as ParserPlugin
+  participant DD as DedupeService
+  participant CL as ClassifyService
+  participant RC as Reconciler
+  participant QS as QuoteScheduler
+  participant QP as PzdataProvider
+  participant FS as FundService
+
+  %% ========== A. 首屏总览 ==========
+  rect rgb(238, 245, 255)
+  Note over U,RP: A. 打开首屏总览（离线也应可用）
+  U->>P: 打开 App
+  P->>RP: useLiveQuery(当月交易 / 账户 / 持仓 / 最新行情 / 待处理)
+  RP-->>P: 数据快照 + 变更订阅
+  P->>AG: computeOverview(monthKey)
+  AG->>AG: 支出 = Σ expense(分) ; 收入 = Σ income ; 净额 = 支出 − Σ refund
+  AG->>AG: 净资产 = Σ账户余额 + Σ(shares × 最近 nav)
+  AG-->>P: { 净资产, 本月支出, 收入, 结余, 环比差, 待分类笔数, 疑似重复笔数 }
+  P-->>U: 一屏 4 个核心数字 + 时间成本横条（时薪未设则显示引导按钮）
+  end
+
+  %% ========== B. 手动记账 ==========
+  rect rgb(240, 255, 240)
+  Note over U,AG: B. 手动快速记账（≤3 次点击）
+  U->>P: FAB → 输金额 15.00 → 点「午餐」→ 保存
+  P->>P: yuanToCents('15.00') → 1500
+  P->>CL: classify({amount_cents:1500, occurred_at, channel})
+  CL-->>P: { l1:'food', l2:'lunch', by:'user' }
+  P->>AG: resolveHourlyWage(settings)
+  AG-->>P: { cents: 4600, basis:'salary_div_hours' }
+  P->>AG: costToTime(1500, 4600) → "0.33 小时"
+  P->>RP: tx.transactions.add(Transaction)
+  RP-->>P: 写入成功（触发 useLiveQuery 重渲染）
+  P->>RP: settings.update(data_version + 1)  // 使按月 memo 失效
+  P-->>U: 流水顶部出现新行（含时间成本小字）
+  end
+
+  %% ========== C. 幂等导入 ==========
+  rect rgb(255, 250, 235)
+  Note over U,RC: C. 官方账单文件导入（幂等 + 对账）
+  U->>P: P3 选文件 wechat_2026.csv
+  P->>IP: import(file)
+  IP->>PS: canHandle(file) → 嗅探表头
+  PS-->>IP: 'wechat_csv'
+  IP->>PS: parse(file)  // TextDecoder('gbk')
+  PS-->>IP: { rows, headerMap, fileTotal:{expense,income,count}, issues }
+  IP->>IP: 字段映射预览（用户确认列）
+  loop 每行明细（跳过 isSummaryRow）
+    IP->>IP: 归一化：金额→分 / 日期补年份与时分 / direction 推断 / 渠道枚举
+    IP->>CL: classify(row)
+    CL-->>IP: { l1, l2, by, confidence }
+    IP->>DD: buildKeys(row, seq)
+    DD-->>IP: { external_id, dedupe_key }
+    IP->>RP: 查 [dedupe_key+source]
+    alt 未命中
+      IP->>RP: add(Transaction{dedupe_status:'clean'})
+    else 命中
+      IP->>RP: add(Transaction{dedupe_status:'suspected', duplicate_of})
+      Note right of RP: 不静默丢弃，进「疑似重复」待裁决
+    end
+  end
+  IP->>RC: reconcile({ fileTotal, rows })
+  RC-->>IP: { sumExpense, sumRefund, diffExpense, reconciled }
+  IP->>RP: add(ImportBatch{... reconciled, issues})
+  P-->>U: 成功 N / 重复 M / 失败 K；明细合计 vs 文件合计；差≠0 红字并可定位到行
+  opt 用户点「撤销本次导入」
+    U->>IP: undo(batchId)
+    IP->>RP: transaction → 批量软删该 batch 的记录
+    RP-->>P: 流水恢复原状
+  end
+  end
+
+  %% ========== D. 基金行情刷新 ==========
+  rect rgb(250, 240, 250)
+  Note over U,FS: D. 基金净值刷新与断网降级
+  U->>P: 打开基金 Tab / 点刷新
+  P->>FS: listHoldingsWithMarketValue()
+  FS->>RP: 读 holdings + 每只 [fund_code+quote_at] 最新一条
+  FS->>QS: refresh(codes)
+  QS->>QP: fetchSeries('161725')
+  QP->>QP: 动态插入 <script src="fund.eastmoney.com/pingzhongdata/161725.js">
+  alt 加载成功（读取全局变量后 delete window.*）
+    QP-->>QS: NavPoint[](最近 400 点) + navDate
+    QS->>RP: upsert FundQuote{kind:'nav', quote_at}
+    FS-->>P: 市值 = shares × nav，标注净值日期
+  else 超时 / 301 / 变量缺失
+    QS->>QP: 回退 eastmoney_push2（仅场内 LOF/ETF）
+    alt 仍失败
+      QS-->>FS: QUOTE_UNAVAILABLE
+      FS-->>P: 用库内最近价 + 灰字「数据截至 X 日」（绝不显示 0）
+    end
+  end
+  end
+
+  %% ========== E. 月度复盘卡 ==========
+  rect rgb(250, 250, 235)
+  Note over U,RP: E. 每月 1 日生成复盘卡（纯本地计算，无后台）
+  U->>P: 打开 App（当天 = 每月 1 日且上月卡不存在）
+  P->>AG: buildReviewCard(prevMonthKey)
+  AG->>RP: 读上月全部交易（索引 [month_key+direction]）
+  AG->>AG: totals / top3 / priciest / most_worthless / impulse(派生规则) / mom / goal_progress
+  AG->>RP: add(ReviewCard{ payload 快照, schema_version })
+  P-->>U: 8 屏卡片；分享图默认隐藏绝对金额
+  Note over AG,RP: 快照不被后续补录改写——这是"历史结论"而非"实时汇总"
+  end

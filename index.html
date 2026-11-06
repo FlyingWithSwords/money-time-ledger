@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <meta name="theme-color" content="#0f1115" />
+    <meta name="description" content="把每笔支出换算成还要工作多久。无账号、无上传，数据只存本机。" />
+    <meta name="referrer" content="no-referrer" />
+    <title>快记账</title>
+    <link rel="icon" type="image/svg+xml" href="./icons/icon.svg" />
+    <link rel="apple-touch-icon" href="./icons/icon.svg" />
+    <!--
+      主题镜像在 JS 加载前同步应用：IndexedDB 读取是异步的，若用户存了深色而系统是浅色，
+      首屏会先亮再暗闪一下。localStorage 是同步的，先在这里把底色和状态栏对齐。
+    -->
+    <script>
+      (function () {
+        try {
+          var saved = localStorage.getItem('ledger.theme');
+          var dark = saved === 'dark' || (saved !== 'light' && window.matchMedia('(prefers-color-scheme: dark)').matches);
+          var color = dark ? '#0f1115' : '#f7f7f5';
+          document.documentElement.style.backgroundColor = color;
+          var meta = document.querySelector('meta[name="theme-color"]');
+          if (meta) meta.setAttribute('content', color);
+        } catch (e) {
+          /* 无痕模式下 localStorage 不可用，按默认浅色渲染即可 */
+        }
+      })();
+    </script>
+  </head>
+  <body>
+    <div id="root"></div>
+    <noscript>这个应用需要 JavaScript 才能运行。所有数据都保存在你当前这台设备的浏览器里。</noscript>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

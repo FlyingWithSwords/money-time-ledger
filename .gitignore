@@ -1,0 +1,18 @@
+node_modules/
+dist/
+dist-ssr/
+dev-dist/
+*.local
+.DS_Store
+.vite/
+coverage/
+
+# OCR 语言包与引擎资产体积较大，不入库，用 npm run fetch:tessdata 准备
+public/tessdata/*.traineddata
+public/tessdata/*.traineddata.gz
+# 记录当前装的是 best 还是 fast（本机状态，不入库）
+public/tessdata/.pack.json
+public/tesseract/*.js
+public/tesseract/*.wasm
+!public/tesseract/README.md
+.tmp/

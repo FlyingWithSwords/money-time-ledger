@@ -1,0 +1,154 @@
+%% 服务层类图 · money_time_ledger
+%% 数据实体见 02-arch.md §2.2（TypeScript 接口）；此图只画服务与插件边界
+
+classDiagram
+  direction LR
+
+  %% ---------- 数据层 ----------
+  class LedgerDb {
+    +version(n) stores(schema)
+    +transactions
+    +accounts
+    +categories
+    +rules
+    +holdings
+    +quotes
+    +goals
+    +batches
+    +settings
+    +reviews
+    +migrate(from, to)
+  }
+  class TransactionRepo {
+    +addMany(txs) TxList
+    +findByDedupeKey(key, source) Transaction
+    +queryByMonth(monthKey, dir) TxList
+    +softDeleteByBatch(batchId) number
+    +updateCategory(id, l1, l2) void
+  }
+  class SettingsRepo {
+    +get(key) unknown
+    +bumpDataVersion() void
+  }
+
+  %% ---------- 领域服务（纯函数，无 IO） ----------
+  class MoneyService {
+    +yuanToCents(y) Cents
+    +centsToYuan(c) string
+    +formatCents(c, opts) string
+    +sumCents(list) Cents
+  }
+  class ClassifyService {
+    +classify(input, ctx) ClassifyResult
+    +learn(tx, newCategory) CategoryRule
+    +resolveConflict(rules, input) CategoryRule
+  }
+  class TimeCostService {
+    +resolveHourlyWage(settings) WageResult
+    +costToTime(amount, wage, workdayHours) TimeCost
+  }
+  class FlagService {
+    +computeFlags(tx, neighbors, monthStats) FlagHitList
+    +getCache(monthKey) FlagHitList
+    +invalidate(monthKey) void
+  }
+  class AggregateService {
+    +overview(monthKey) OverviewVM
+    +categoryShares(monthKey) ShareVM
+    +trend(months) TrendPointList
+    +netWorth() Cents
+    +fundMarketValue() Cents
+    +buildReviewCard(monthKey) ReviewCard
+    +compare(monthKey, baseline) CompareVM
+  }
+
+  %% ---------- 导入管线 ----------
+  class ImportPipeline {
+    +import(file, opts) ImportReport
+    +undo(batchId) void
+    -parse() ParseOutcome
+    -normalize() TxList
+    -dedupe() DedupeResult
+    -persist() void
+    -reconcile() ImportBatch
+  }
+  class Parser {
+    <<interface>>
+    +id string
+    +canHandle(file) bool
+    +parse(file, opts) ParseOutcome
+    +fieldHints FieldHintMap
+    +isSummaryRow(row) bool
+  }
+  class WechatCsvParser
+  class AlipayCsvParser
+  class LegacyXlsxParser {
+    +inferYear(monthSeq) number
+    +fillDownDates(rows) RawRowList
+  }
+  class OcrParser {
+    -loadTesseract() void
+    -loadLangPack() void
+    +parse(image) ParseOutcome
+  }
+  class DedupeService {
+    +buildKeys(row, seq) KeyPair
+    +detectDuplicate(keys, source) DedupeVerdict
+    +resolve(id, action) void
+  }
+  class Reconciler {
+    +reconcile(input) ImportBatch
+    +locateDiff(fileTotal, rows) UnmatchedRowList
+  }
+
+  %% ---------- 行情 ----------
+  class QuoteProvider {
+    <<interface>>
+    +id string
+    +supports(code) bool
+    +fetchLatest(code, signal) QuoteResult
+    +fetchSeries(code, range) NavPointList
+  }
+  class PzdataProvider {
+    -loadVarScript(url) void
+    +fetchLatest(code) QuoteResult
+    +fetchSeries(code, range) NavPointList
+  }
+  class Push2Provider {
+    +fetchLatest(code) QuoteResult
+  }
+  class ManualProvider
+  class QuoteScheduler {
+    +refresh(codes) QuoteResultList
+    +isTradingHours(now) bool
+  }
+
+  %% ---------- 备份与设置 ----------
+  class BackupService {
+    +exportEncrypted(passphrase) Blob
+    +restore(file, passphrase) void
+    +exportCsv() Blob
+  }
+
+  %% ---------- 关系 ----------
+  ImportPipeline --> Parser : 依赖抽象
+  Parser <|.. WechatCsvParser
+  Parser <|.. AlipayCsvParser
+  Parser <|.. LegacyXlsxParser
+  Parser <|.. OcrParser
+  ImportPipeline --> DedupeService
+  ImportPipeline --> Reconciler
+  ImportPipeline --> ClassifyService
+  ImportPipeline --> TransactionRepo
+  QuoteScheduler --> QuoteProvider
+  QuoteProvider <|.. PzdataProvider
+  QuoteProvider <|.. Push2Provider
+  QuoteProvider <|.. ManualProvider
+  AggregateService --> TransactionRepo
+  AggregateService --> FlagService
+  AggregateService --> TimeCostService
+  AggregateService --> MoneyService
+  FlagService --> TransactionRepo
+  TransactionRepo --> LedgerDb
+  SettingsRepo --> LedgerDb
+  BackupService --> LedgerDb

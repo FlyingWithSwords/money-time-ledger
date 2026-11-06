@@ -1,0 +1,59 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/*
+ * MUI 的 CssBaseline 负责 reset，Tailwind preflight 已关闭。
+ * 这里只补几件事：底色、数字等宽对齐、iOS 输入框自动放大规避、启动占位动画。
+ */
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+  padding: 0;
+}
+
+body {
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  overscroll-behavior-y: none;
+  font-family: system-ui, -apple-system, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', sans-serif;
+}
+
+/* 金额永远等宽，避免位数变化时抖动 */
+.tabular {
+  font-variant-numeric: tabular-nums;
+}
+
+/*
+ * 手机端输入框 <16px 会触发 iOS 自动缩放。
+ * 注意：MUI 的 emotion class 优先级高于元素选择器，sizeSmall 的覆盖放在 theme.ts 里，
+ * 这里只兜住非 MUI 的原生输入元素。
+ */
+input,
+textarea,
+select {
+  font-size: 16px;
+}
+
+/* 隐藏滚动条但保留滚动能力（流水长列表更干净） */
+.no-scrollbar {
+  scrollbar-width: thin;
+}
+
+/* 启动占位的进度条（此时 ThemeProvider 尚未挂载，只能用全局 CSS 动画） */
+@keyframes boot-indeterminate {
+  0% {
+    transform: translateX(-100%);
+  }
+  100% {
+    transform: translateX(320%);
+  }
+}
+
+@media print {
+  .no-print {
+    display: none;
+  }
+}
