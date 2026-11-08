@@ -143,6 +143,46 @@ describe('流水页：批量模式入口', () => {
   });
 });
 
+describe('流水页：批量删除与撤销', () => {
+  it('删除后点提示里的「撤销」，这几笔原样回到流水里', async () => {
+    page = await mount();
+    await enterBatch();
+
+    const boxes = page.checkboxes();
+    await act(async () => {
+      boxes[0].click();
+      boxes[1].click();
+    });
+    await waitFrames(60);
+    expect(page.text()).toContain('2 笔');
+
+    const del = page.buttons().find((item) => item.textContent?.trim() === '删除');
+    await act(async () => {
+      del?.click();
+    });
+    await waitFrames(200);
+
+    // 删掉两笔，流水里只剩一笔
+    expect(await transactionRepo.listAll()).toHaveLength(1);
+    const snack = useUiStore.getState().snack;
+    expect(snack?.message).toBe('已删除 2 笔');
+    expect(snack?.actionLabel).toBe('撤销');
+
+    // 撤销走的是提示条上的动作，不是再点一次删除。
+    // 顺序与 AppShell 一致：先触发动作，再关掉当前这条提示，
+    // 否则「已恢复」会排进队列、等这条超时才显示。
+    await act(async () => {
+      useUiStore.getState().snack?.onAction?.();
+      useUiStore.getState().clearSnack();
+      await new Promise((resolve) => setTimeout(resolve, 250));
+    });
+
+    const active = (await transactionRepo.listAll()).map((row) => row.id).sort();
+    expect(active).toEqual(SAMPLE.map((row) => row.id).sort());
+    expect(useUiStore.getState().snack?.message).toBe('已恢复 2 笔');
+  });
+});
+
 describe('流水页：拖拽落点', () => {
   it('批量模式下每个一级分类都是投放区', async () => {
     page = await mount();

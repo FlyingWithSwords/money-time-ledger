@@ -86,7 +86,13 @@ export function Ledger(): JSX.Element {
   const wage = useWageResult(settings);
   const tree = useCategoryTree();
   const [showDeleted, setShowDeleted] = useState(false);
-  const [lastDeleted, setLastDeleted] = useState<Transaction | null>(null);
+  /**
+   * 刚删掉的那一笔，以及它**那次删除**的时间戳。
+   *
+   * 只有 tx 是不够的：撤销期间这一笔可能已被别处删过或手动恢复过，
+   * 光凭 id 恢复会把不该恢复的东西捞回来。戳记让「撤销」只作用于这一次删除。
+   */
+  const [lastDeleted, setLastDeleted] = useState<{ tx: Transaction; stamp: string } | null>(null);
   /** 待确认删除的流水：非 null 即打开二次确认框。 */
   const [pendingDelete, setPendingDelete] = useState<Transaction | null>(null);
   /** 所有异步写共用的闸门，避免连点重复提交。 */
@@ -166,15 +172,29 @@ export function Ledger(): JSX.Element {
     const ids = [...selected];
     setBusy(true);
     try {
-      const changed = await transactionRepo.bulkSoftDelete(ids);
+      // 回执只包含这次真正删掉的行 + 这次的时间戳，撤销照它精确回滚
+      const receipt = await transactionRepo.bulkSoftDelete(ids);
       await settingsRepo.bumpDataVersion();
       exitBatch();
+      if (receipt.ids.length === 0) {
+        // 选中的都是已删除的行（开了「显示已删除」时可能选中）
+        showSnack({ message: '这批记录已经是删除状态，没有可删的', severity: 'info' });
+        return;
+      }
       showSnack({
-        message: `已删除 ${changed} 笔`,
+        message: `已删除 ${receipt.ids.length} 笔`,
         severity: 'info',
         actionLabel: '撤销',
         onAction: () => {
-          void transactionRepo.bulkRestore(ids).then(() => settingsRepo.bumpDataVersion());
+          void transactionRepo.undoDelete(receipt).then(async (restored) => {
+            await settingsRepo.bumpDataVersion();
+            // 恢复数少于删除数说明期间有行被别处改过（已删/已恢复），如实说出来
+            const partial = restored < receipt.ids.length;
+            showSnack({
+              message: partial ? `已恢复 ${restored} 笔，其余在这期间被改过，未动` : `已恢复 ${restored} 笔`,
+              severity: partial ? 'warning' : 'success',
+            });
+          });
         },
       });
     } catch (error) {
@@ -321,9 +341,9 @@ export function Ledger(): JSX.Element {
 
   /** 删除的原有写路径保持不变，只是改由确认框触发。 */
   const performDelete = async (tx: Transaction): Promise<void> => {
-    await transactionRepo.softDelete(tx.id);
+    const stamp = await transactionRepo.softDelete(tx.id);
     await settingsRepo.bumpDataVersion();
-    setLastDeleted(tx);
+    setLastDeleted({ tx, stamp });
     showSnack({ message: '已删除，可撤销', severity: 'info' });
   };
 
@@ -339,14 +359,41 @@ export function Ledger(): JSX.Element {
     }
   };
 
-  const handleRestore = async (tx: Transaction): Promise<void> => {
+  /**
+   * 「已删除」折叠区里逐行恢复。
+   *
+   * 这里用户是**明确指着某一笔已删记录**点的恢复，所以直接 restore(id) 是对的：
+   * 它和「刚删完那一笔的撤销」不是一回事——后者要认时间戳，见 handleRestore。
+   */
+  const restoreFromList = async (tx: Transaction): Promise<void> => {
     if (busy) return;
     setBusy(true);
     try {
       await transactionRepo.restore(tx.id);
       await settingsRepo.bumpDataVersion();
-      setLastDeleted(null);
       showSnack({ message: '已恢复', severity: 'success' });
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  /**
+   * 撤销单笔删除。
+   *
+   * 用「id + 那次删除的时间戳」而不是直接 restore：这一笔如果在提示条还挂着的时候
+   * 被别处改过（已删/已恢复），撤销就不该再动它，只如实告诉用户没东西可恢复。
+   */
+  const handleRestore = async (target: { tx: Transaction; stamp: string }): Promise<void> => {
+    if (busy) return;
+    setBusy(true);
+    try {
+      const restored = await transactionRepo.undoDelete({ ids: [target.tx.id], stamp: target.stamp });
+      await settingsRepo.bumpDataVersion();
+      setLastDeleted(null);
+      showSnack({
+        message: restored > 0 ? '已恢复' : '这笔在这期间被改过，没有需要恢复的记录',
+        severity: restored > 0 ? 'success' : 'info',
+      });
     } finally {
       setBusy(false);
     }
@@ -737,7 +784,7 @@ export function Ledger(): JSX.Element {
             </Button>
           }
         >
-          删除了 1 笔 {formatCents(lastDeleted.amount_cents)}
+          删除了 1 笔 {formatCents(lastDeleted.tx.amount_cents)}
         </Alert>
       )}
 
@@ -818,7 +865,7 @@ export function Ledger(): JSX.Element {
                 <Typography variant="body2" color="text.secondary">
                   {tx.occurred_date} · {labelOf(tx, tree)} · {formatCents(tx.amount_cents)}
                 </Typography>
-                <Button size="small" disabled={busy} onClick={() => void handleRestore(tx)}>
+                <Button size="small" disabled={busy} onClick={() => void restoreFromList(tx)}>
                   恢复
                 </Button>
               </Box>

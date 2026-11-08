@@ -209,13 +209,22 @@ export function TxEditorDialog(): JSX.Element {
   };
 
   /** 撤销删除：复用 transactionRepo.restore（软删的逆操作），失败也给出可读原因。 */
-  const restoreDeleted = async (txId: string): Promise<void> => {
+  /**
+   * 撤销这次删除。
+   *
+   * 按「id + 那次删除的时间戳」恢复，而不是直接 restore(id)：提示条要挂 6 秒，
+   * 这期间这一笔可能已被别处删过或恢复过，凭 id 恢复会把不该动的行一起改回来。
+   */
+  const restoreDeleted = async (receipt: transactionRepo.DeleteReceipt): Promise<void> => {
     if (restoringRef.current) return;
     restoringRef.current = true;
     try {
-      await transactionRepo.restore(txId);
+      const restored = await transactionRepo.undoDelete(receipt);
       await settingsRepo.bumpDataVersion();
-      showSnack({ message: '已恢复这一笔', severity: 'success' });
+      showSnack({
+        message: restored > 0 ? '已恢复这一笔' : '这一笔在这期间被改过，没有需要恢复的记录',
+        severity: restored > 0 ? 'success' : 'info',
+      });
     } catch (error) {
       showSnack({ message: `操作失败：${describeError(error)}`, severity: 'error' });
     } finally {
@@ -234,14 +243,14 @@ export function TxEditorDialog(): JSX.Element {
     if (!txId || deleteBusy) return;
     setDeleteBusy(true);
     try {
-      await transactionRepo.softDelete(txId);
+      const stamp = await transactionRepo.softDelete(txId);
       await settingsRepo.bumpDataVersion();
       showSnack({
         message: '已删除',
         severity: 'success',
         actionLabel: '撤销',
         onAction: () => {
-          void restoreDeleted(txId);
+          void restoreDeleted({ ids: [txId], stamp });
         },
       });
       close();

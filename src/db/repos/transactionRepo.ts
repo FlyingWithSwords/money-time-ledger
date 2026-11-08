@@ -100,9 +100,44 @@ export async function markInvestPrincipal(ids: readonly string[], flag: string):
   return changed;
 }
 
-export async function softDelete(id: string): Promise<void> {
-  const now = new Date().toISOString();
-  await db.transactions.update(id, { deleted_at: now, updated_at: now });
+/**
+ * 删除操作的**回执**：撤销只认「这一批 + 这一个时间戳」。
+ *
+ * 撤销为什么不能只靠 id 列表：id 列表在「删」与「撤销」之间会变旧。
+ * 同一笔可能在这期间被别处又删过一次（比如去重裁决把重复行改判删除），
+ * 也可能已被用户在「已删除」里手动恢复。按 id 无脑 restore 会把这些行一起捞回来，
+ * 用户看到的就是「撤销恢复出了我没选的东西」。带上时间戳才能一眼判定：
+ * 这一行现在还属于我这次删的那批吗？
+ */
+export interface DeleteReceipt {
+  /** 本次真正删掉的行（本来就已删的不会进来） */
+  ids: string[];
+  /** 整批共用的 `deleted_at`；空串表示这次一行都没删 */
+  stamp: string;
+}
+
+/** 上下文内单调递增的删除时间戳，见 nextDeleteStamp。 */
+let lastDeleteStamp = 0;
+
+/**
+ * 生成删除时间戳，并保证本上下文内严格递增。
+ *
+ * 撤销靠 `deleted_at` 精确匹配，两次删除落在同一毫秒就会串台：
+ * 撤销 A 会把同一毫秒删掉的 B 一起捞回来（快节奏连点、批量脚本、测试里都很容易撞上）。
+ * 让时间戳严格递增，代价只是同一毫秒内的第二笔删除多 1ms，用户感知不到。
+ */
+function nextDeleteStamp(): string {
+  const now = Date.now();
+  const ms = now > lastDeleteStamp ? now : lastDeleteStamp + 1;
+  lastDeleteStamp = ms;
+  return new Date(ms).toISOString();
+}
+
+/** 软删一笔，返回这次使用的删除时间戳（撤销时按它精确匹配）。 */
+export async function softDelete(id: string): Promise<string> {
+  const stamp = nextDeleteStamp();
+  await db.transactions.update(id, { deleted_at: stamp, updated_at: stamp });
+  return stamp;
 }
 
 /**
@@ -164,24 +199,26 @@ export async function bulkUpdateCategory(ids: readonly string[], l1: string, l2:
 }
 
 /**
- * 批量删除（软删）。返回实际删除的条数。
+ * 批量删除（软删），返回回执。
  *
  * 已经删过的跳过：背包里选中的行可能包含上一次操作后已被别处删掉的，
- * 重复写 deleted_at 会让「撤销」提示显示的条数虚高。
+ * 重复写 deleted_at 会让「撤销」提示显示的条数虚高，更糟的是让撤销把
+ * 那些**本来就已经删掉**的行一起恢复出来。所以回执里只放这次真正改了的 id，
+ * 并且整批共用同一个时间戳，撤销才能做到「精确回滚到操作前」。
  */
-export async function bulkSoftDelete(ids: readonly string[]): Promise<number> {
-  if (ids.length === 0) return 0;
-  const now = new Date().toISOString();
-  let changed = 0;
+export async function bulkSoftDelete(ids: readonly string[]): Promise<DeleteReceipt> {
+  if (ids.length === 0) return { ids: [], stamp: '' };
+  const stamp = nextDeleteStamp();
+  const deleted: string[] = [];
   await db.transaction('rw', db.transactions, async () => {
     for (const id of ids) {
       const tx = await db.transactions.get(id);
       if (!tx || tx.deleted_at) continue;
-      await db.transactions.update(id, { deleted_at: now, updated_at: now });
-      changed += 1;
+      await db.transactions.update(id, { deleted_at: stamp, updated_at: stamp });
+      deleted.push(id);
     }
   });
-  return changed;
+  return deleted.length > 0 ? { ids: deleted, stamp } : { ids: [], stamp: '' };
 }
 
 /**
@@ -212,14 +249,24 @@ export async function bulkAppendNote(ids: readonly string[], text: string): Prom
   return changed;
 }
 
-export async function bulkRestore(ids: readonly string[]): Promise<number> {
-  if (ids.length === 0) return 0;
+/**
+ * 撤销一次删除：只恢复**那一次**删掉的行，返回实际恢复条数。
+ *
+ * 两道闸门缺一不可：
+ * - 只认回执里的 id（这次真正删掉的），不碰选择时列表里本来就已删的行；
+ * - 还要 `deleted_at === stamp`（这一行现在仍是那次删的），
+ *   期间被别处删过（时间戳不同）或已被手动恢复过的，一律不动。
+ *
+ * 因此它是幂等的：撤销点两次，第二次返回 0，不会出现「恢复出已删记录」的怪象。
+ */
+export async function undoDelete(receipt: DeleteReceipt): Promise<number> {
+  if (!receipt.stamp || receipt.ids.length === 0) return 0;
   const now = new Date().toISOString();
   let changed = 0;
   await db.transaction('rw', db.transactions, async () => {
-    for (const id of ids) {
+    for (const id of receipt.ids) {
       const tx = await db.transactions.get(id);
-      if (!tx || !tx.deleted_at) continue;
+      if (!tx || tx.deleted_at !== receipt.stamp) continue;
       await db.transactions.update(id, { deleted_at: undefined, updated_at: now });
       changed += 1;
     }
