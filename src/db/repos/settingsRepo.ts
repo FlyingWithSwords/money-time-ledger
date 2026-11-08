@@ -1,6 +1,7 @@
 import { db } from '../db';
 import { SETTING_KEYS } from '../settingKeys';
 import { asCents } from '../../domain/money';
+import type { IncomeSource } from '../../domain/incomeSource';
 import type { WageSettings } from '../../domain/timecost';
 import { DEFAULT_WAGE_SETTINGS } from '../../domain/timecost';
 
@@ -119,4 +120,27 @@ export async function getLastBackupAt(): Promise<string | null> {
 
 export async function markBackupDone(at: string): Promise<void> {
   await set(SETTING_KEYS.lastBackupAt, at);
+}
+
+/**
+ * 用户确认过的收入来源（工资/补贴）。
+ *
+ * 读的时候要防御脏数据：早期版本可能写进过字符串或对象，导入管线按数组消费，
+ * 一旦拿到非数组会直接抛错、整份账单导不进来——这里收敛成空数组，最坏退化成「不自动改判」。
+ */
+export async function getIncomeSources(): Promise<IncomeSource[]> {
+  const value = await get<unknown>(SETTING_KEYS.incomeSources, []);
+  if (!Array.isArray(value)) return [];
+  return value.filter(
+    (item): item is IncomeSource =>
+      !!item &&
+      typeof item === 'object' &&
+      typeof (item as IncomeSource).keyword === 'string' &&
+      ((item as IncomeSource).l1 === 'salary' || (item as IncomeSource).l1 === 'allowance'),
+  );
+}
+
+export async function setIncomeSources(sources: readonly IncomeSource[]): Promise<void> {
+  await set(SETTING_KEYS.incomeSources, sources);
+  await bumpDataVersion();
 }

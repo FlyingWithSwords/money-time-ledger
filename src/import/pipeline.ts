@@ -3,9 +3,10 @@ import { db } from '../db';
 import { SETTING_KEYS } from '../db/settingKeys';
 import * as categoryRepo from '../db/repos/categoryRepo';
 import * as ruleRepo from '../db/repos/ruleRepo';
-import { classify } from '../domain/classify';
+import { classify, ensureCategory } from '../domain/classify';
 import { deriveDateFields, nowIso } from '../domain/date';
 import { LedgerError } from '../domain/errors';
+import { detectWhitelistedIncome, type IncomeSource } from '../domain/incomeSource';
 import { detectInvestPrincipal, INVEST_PRINCIPAL_FLAG } from '../domain/investPrincipal';
 import { asCents, centsToYuan, sumCents } from '../domain/money';
 import type { Cents, ImportBatch, ImportIssue, PaymentChannel, Source, Transaction } from '../types';
@@ -47,8 +48,16 @@ export interface ImportReport {
   /** 被识别为投资本金、改判为不计收支的笔数与金额（已从 sumExpense 里剔除） */
   investRows: number;
   investCents: Cents;
+  /** 命中所设置里确认过的收入来源、由转账/支出改判为收入的笔数与金额 */
+  incomeRows: number;
+  incomeCents: Cents;
   fileTotal?: { expense?: Cents; income?: Cents; count?: number };
   diffExpense: Cents | null;
+  /**
+   * 收入侧差额。工资改判之后必须能看见它：
+   * 只报支出侧差异的话，一份「收入多算了 8000」的账单会显示成对平。
+   */
+  diffIncome: Cents | null;
   reconciled: boolean;
   comparable: boolean;
   issues: ImportIssue[];
@@ -84,8 +93,16 @@ export async function runImport(file: ImportFile, opts: ImportOptions = {}): Pro
   const fileHash = sha1Hex(`${file.name}|${file.size}|${text.slice(0, 4096)}`).slice(0, 24);
 
   const outcome = opts.preParsed ?? (await parser.parse(file, { headerMap: opts.headerMap, defaultYear: opts.defaultYear }));
-  const [rules, categories] = await Promise.all([ruleRepo.loadForClassify(), categoryRepo.list()]);
+  const [rules, categories, incomeSetting] = await Promise.all([
+    ruleRepo.loadForClassify(),
+    categoryRepo.list(),
+    db.settings.get(SETTING_KEYS.incomeSources),
+  ]);
   const ctx = { rules, categories };
+  /** 用户在设置里勾选过的收入来源；为空 = 不做任何方向改判，行为与旧版完全一致 */
+  const incomeSources: IncomeSource[] = Array.isArray(incomeSetting?.value)
+    ? (incomeSetting.value as IncomeSource[])
+    : [];
 
   const importedAt = nowIso();
   const batchId = `batch:${nanoid(10)}`;
@@ -105,8 +122,13 @@ export async function runImport(file: ImportFile, opts: ImportOptions = {}): Pro
   /** 买基金/理财/黄金的本金：文件里记成支出，但它是资产转换，入账改判 transfer */
   let investRows = 0;
   let investCents = 0;
+  /** 用户确认过的收入来源（工资/补贴）：命中则把 transfer/支出改判成收入 */
+  let incomeRows = 0;
+  let incomeCents = 0;
   /** 被改判的行（draft id），对账时按文件支出侧加回 */
   const excludedDraftIds = new Set<string>();
+  /** 被改判成收入的行（draft id），对账时从文件收入侧剔除 */
+  const incomeDraftIds = new Set<string>();
 
   const defaultYear = opts.defaultYear ?? new Date().getFullYear();
 
@@ -165,31 +187,50 @@ export async function runImport(file: ImportFile, opts: ImportOptions = {}): Pro
       counterparty: row.counterparty,
       note: row.note,
     });
+    /**
+     * 工资/补贴：只认用户在设置里确认过的来源。
+     *
+     * 优先级低于投资本金——两者同时命中说明摘要里既有「基金」又有「工资」
+     * （理财产品的宣传语、或者「工资到账后自动转入余额宝」），那种情况钱确实变成了持仓，
+     * 不能因为摘要带「工资」就判成收入。
+     */
+    const incomeHit = invest.matched
+      ? null
+      : detectWhitelistedIncome(
+          { direction: row.direction, counterparty: row.counterparty, note: row.note },
+          incomeSources,
+        );
     if (invest.matched) {
       investRows += 1;
       investCents += row.amount_cents;
+    } else if (incomeHit) {
+      incomeRows += 1;
+      incomeCents += row.amount_cents;
     } else if (classified.l1 === 'other' && classified.l2 === 'pending') {
       pending += 1;
     }
+    // 白名单里的分类可能已被用户在分类页删掉：收敛到真实存在的分类，收敛不了就沿用判定链结果
+    const incomeCategory = incomeHit ? ensureCategory(incomeHit.l1, incomeHit.l2, ctx) : null;
 
     const seq = nextSeq(row);
     const keys = buildKeys(row, source, seq);
     const fields = deriveDateFields(row.occurred_at);
     const draftId = nanoid(12);
     if (invest.matched) excludedDraftIds.add(draftId);
+    if (incomeHit) incomeDraftIds.add(draftId);
 
     drafts.push({
       id: draftId,
       external_id: keys.external_id,
       dedupe_key: keys.dedupe_key,
       source,
-      direction: invest.matched ? 'transfer' : row.direction,
+      direction: invest.matched ? 'transfer' : incomeHit ? 'income' : row.direction,
       amount_cents: row.amount_cents,
       occurred_at: row.occurred_at,
       occurred_date: fields.occurred_date,
       month_key: fields.month_key,
-      category_l1: classified.l1,
-      category_l2: classified.l2,
+      category_l1: incomeCategory?.l1 ?? classified.l1,
+      category_l2: incomeCategory?.l2 ?? classified.l2,
       account_id: accountForChannel(row.payment_channel),
       payment_channel: row.payment_channel,
       counterparty: row.counterparty,
@@ -210,6 +251,7 @@ export async function runImport(file: ImportFile, opts: ImportOptions = {}): Pro
     direction: draft.direction,
     occurred_date: draft.occurred_date,
     excluded: excludedDraftIds.has(draft.id),
+    excluded_income: incomeDraftIds.has(draft.id),
   }));
 
   const result = await db.transaction('rw', db.transactions, db.batches, db.settings, async () => {
@@ -280,6 +322,14 @@ export async function runImport(file: ImportFile, opts: ImportOptions = {}): Pro
       `已把 ${investRows} 笔买基金/理财/黄金的本金（合计 ${centsToYuan(investCents as Cents)} 元）按不计收支处理：钱从现金变成持仓，不是消费，所以不计入支出。这些记录在流水里仍可见，标记为「投资本金」`,
     );
   }
+  if (incomeRows > 0) {
+    notes.push(
+      `已把 ${incomeRows} 笔命中「${incomeSources
+        .map((source) => source.label)
+        .slice(0, 3)
+        .join('、')}」等收入来源的记录（合计 ${centsToYuan(incomeCents as Cents)} 元）按收入入账：账单里的「收/支」写的是不计收支，但钱确实是工资或补贴。对账已按文件口径剔除这部分，不会显示差额`,
+    );
+  }
   const refundRows = drafts.filter((draft) => draft.direction === 'refund');
   if (refundRows.length > 0) {
     const refundSum = sumCents(refundRows.map((draft) => draft.amount_cents));
@@ -311,8 +361,11 @@ export async function runImport(file: ImportFile, opts: ImportOptions = {}): Pro
     sumRefund: result.rec.sumRefund,
     investRows,
     investCents: asCents(investCents),
+    incomeRows,
+    incomeCents: asCents(incomeCents),
     fileTotal: outcome.fileTotal,
     diffExpense: result.rec.diffExpense,
+    diffIncome: result.rec.diffIncome,
     reconciled: result.rec.reconciled,
     comparable: result.rec.comparable,
     issues,

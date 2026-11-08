@@ -25,6 +25,7 @@ import { OfflineBanner } from '../../pwa/OfflineBanner';
 import { useUiStore } from '../../store/uiStore';
 import { DataGate } from '../hooks/useDataReady';
 import { TxEditorDialog } from '../components/TxEditorDialog';
+import { DragGhost } from '../dnd/DragGhost';
 import { NAV_ITEMS, SETTINGS_ITEM } from './navItems';
 
 const DRAWER_WIDTH = 228;
@@ -41,6 +42,7 @@ export function AppShell(): JSX.Element {
   const snack = useUiStore((state) => state.snack);
   const clearSnack = useUiStore((state) => state.clearSnack);
   const setQuickAddOpen = useUiStore((state) => state.setQuickAddOpen);
+  const fabHidden = useUiStore((state) => state.fabHidden);
 
   const active = useMemo(() => {
     const path = location.pathname;
@@ -111,8 +113,13 @@ export function AppShell(): JSX.Element {
             flexGrow: 1,
             px: { xs: 2, md: 3 },
             pt: { xs: 2, md: 2.5 },
-            // 底部导航 56 + FAB 56 + 余量：手机上滚到底时最后一行不会被 FAB 压住。
-            pb: { xs: 'calc(112px + env(safe-area-inset-bottom, 0px))', md: 4 },
+            /*
+              底部留白要盖住两样东西：底部导航（56 + 安全区）与它上方 24px 处的悬浮球（56 直径）。
+              原来按 112px 算，只够让最后一行停在球的下沿之外；
+              但球是圆的、行的右侧还常有图标按钮，实际仍会压住最右边的删除/编辑。
+              这里提到 148px，让最后一行整体落在球的上方。
+            */
+            pb: { xs: 'calc(148px + env(safe-area-inset-bottom, 0px))', md: 10 },
             maxWidth: 1080,
             width: '100%',
             mx: 'auto',
@@ -124,19 +131,21 @@ export function AppShell(): JSX.Element {
         </Box>
       </Box>
 
-      <Fab
-        color="primary"
-        aria-label="记一笔"
-        onClick={() => setQuickAddOpen(true)}
-        sx={{
-          position: 'fixed',
-          right: { xs: 16, md: 32 },
-          bottom: { xs: 'calc(80px + env(safe-area-inset-bottom, 0px))', md: 32 },
-          zIndex: 1300,
-        }}
-      >
-        <AddIcon />
-      </Fab>
+      {!fabHidden && (
+        <Fab
+          color="primary"
+          aria-label="记一笔"
+          onClick={() => setQuickAddOpen(true)}
+          sx={{
+            position: 'fixed',
+            right: { xs: 16, md: 32 },
+            bottom: { xs: 'calc(80px + env(safe-area-inset-bottom, 0px))', md: 32 },
+            zIndex: 1300,
+          }}
+        >
+          <AddIcon />
+        </Fab>
+      )}
 
       {!isDesktop && (
         <Box
@@ -193,6 +202,8 @@ export function AppShell(): JSX.Element {
       )}
 
       <TxEditorDialog />
+      {/* 拖拽浮层挂在最外层：它用 portal 定位到 body，放在这里只为跟随时钟/主题一致 */}
+      <DragGhost />
 
       <Snackbar
         key={snack?.id ?? 'idle'}

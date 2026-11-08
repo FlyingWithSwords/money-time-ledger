@@ -20,6 +20,14 @@ export interface ReconcileRow {
    * 与 refundOnExpense 是同一个套路：口径差，不是丢数据。
    */
   excluded?: boolean;
+  /**
+   * 已改判成收入、但**文件里算在中性侧**（收/支 = `/` 或「不计收支」）的行。
+   *
+   * 工资、补贴从银行卡转到微信/支付宝时就是这样：账本里它是实打实的收入，
+   * 但文件合计的收入侧不含它。不在这里扣掉，每份含工资转账的账单都会显示
+   * 「收入多出 N 元」——用户会以为解析多记了，实际是口径差。
+   */
+  excluded_income?: boolean;
 }
 
 export interface ReconcileInput {
@@ -56,6 +64,8 @@ export function reconcile(input: ReconcileInput): ReconcileResult {
   let sumRefund = 0;
   /** 被排除出支出、但仍属文件支出侧的金额（投资本金） */
   let excludedExpense = 0;
+  /** 账本算收入、但文件合计的收入侧不含的金额（工资/补贴改判） */
+  let incomeOffFile = 0;
   for (const row of input.rows) {
     // 排除行的方向已被改判成 transfer：既不进支出也不进收入，只在对账时按文件口径加回
     if (row.excluded) {
@@ -63,12 +73,15 @@ export function reconcile(input: ReconcileInput): ReconcileResult {
       continue;
     }
     if (row.direction === 'expense') sumExpense += row.amount_cents;
-    else if (row.direction === 'income') sumIncome += row.amount_cents;
-    else if (row.direction === 'refund') sumRefund += row.amount_cents;
+    else if (row.direction === 'income') {
+      sumIncome += row.amount_cents;
+      // 工资改判的行仍进 sumIncome（账本口径它确实是收入），但要比文件合计少算一份
+      if (row.excluded_income) incomeOffFile += row.amount_cents;
+    } else if (row.direction === 'refund') sumRefund += row.amount_cents;
   }
   // 毛额口径：文件合计含已退款的行与被排除的投资本金，都按原侧加回去才与明细可比
   const grossExpense = sumExpense + (input.refundOnExpense ?? 0) + excludedExpense;
-  const grossIncome = sumIncome + (input.refundOnIncome ?? 0);
+  const grossIncome = sumIncome - incomeOffFile + (input.refundOnIncome ?? 0);
   const diffExpense = input.fileExpense !== undefined ? asCents(input.fileExpense - grossExpense) : null;
   const diffIncome = input.fileIncome !== undefined ? asCents(input.fileIncome - grossIncome) : null;
   const comparable = diffExpense !== null || diffIncome !== null;

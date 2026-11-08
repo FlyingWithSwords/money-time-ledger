@@ -18,6 +18,12 @@ export const SETTING_KEYS = {
   onboarded: 'onboarded',
   /** 上次用的分类，手动记账默认选中（PRD「记住上次分类」） */
   lastCategory: 'last_category',
+  /**
+   * 用户确认过的「哪些来源算收入」。存 IncomeSource[]：
+   * 命中关键词就把方向改判为 income 并按给定分类入账。
+   * 单独一条设置而不是 CategoryRule，因为规则只改分类、改不了方向。
+   */
+  incomeSources: 'income_sources',
 } as const;
 
 export type SettingKey = (typeof SETTING_KEYS)[keyof typeof SETTING_KEYS];

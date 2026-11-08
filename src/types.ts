@@ -211,6 +211,56 @@ export interface Budget {
   limit_cents: Cents;
 }
 
+/**
+ * 消费计划备忘录的类型。
+ *
+ * - `save` = 攒钱：拖着**收入**记录往里累计，攒够目标就进入「可以消费了」。
+ * - `spend` = 消费：拖着**支出**记录往里累计，花到目标就算完成；
+ *   实际花得比预算少，完成时把差额记成「省下多少」。
+ *
+ * 两者刻意是**两条独立记录**，不做余额联动：用户明确要的就是
+ * 「攒钱买主机」和「主机采购」各自一条进度，而不是一个双向账本。
+ */
+export type PlanKind = 'save' | 'spend';
+export type PlanStatus = 'active' | 'done' | 'archived';
+
+export const PLAN_KIND_LABEL: Record<PlanKind, string> = {
+  save: '攒钱',
+  spend: '消费',
+};
+
+export interface Plan {
+  id: string;
+  title: string;
+  kind: PlanKind;
+  target_cents: Cents;
+  note?: string;
+  status: PlanStatus;
+  created_at: string;
+  completed_at?: string;
+  /**
+   * 完成瞬间冻结的累计额。
+   *
+   * 不冻结的话，完成之后再有流水删改，「省下 320 元」会跟着变，
+   * 用户回看历史时看到的是一个不断改写的结论——那不是记录，是幻觉。
+   */
+  settled_cents?: Cents;
+  sort: number;
+}
+
+/**
+ * 计划 ↔ 流水的关联。
+ *
+ * 主键用 `${plan_id}:${tx_id}` 而不是自增：同一笔流水在同一计划里只能累计一次
+ * （拖两次不该翻倍），但可以同时属于「攒钱」和「消费」两条独立计划。
+ */
+export interface PlanEntry {
+  id: string;
+  plan_id: string;
+  tx_id: string;
+  created_at: string;
+}
+
 export interface Setting {
   key: string;
   value: unknown;

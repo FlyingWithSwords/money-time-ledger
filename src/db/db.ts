@@ -8,6 +8,8 @@ import type {
   Goal,
   Holding,
   ImportBatch,
+  Plan,
+  PlanEntry,
   ReviewCard,
   Setting,
   Transaction,
@@ -49,6 +51,8 @@ export class LedgerDatabase extends Dexie {
   settings!: Table<Setting, string>;
   reviews!: Table<ReviewCard, string>;
   pair_dismissals!: Table<PairDismissal, string>;
+  plans!: Table<Plan, string>;
+  plan_entries!: Table<PlanEntry, string>;
 
   constructor(name = 'money_time_ledger') {
     super(name);
@@ -121,6 +125,54 @@ export class LedgerDatabase extends Dexie {
           .modify((row) => {
             if (!row.platform) row.platform = 'manual';
           });
+      });
+
+    /**
+     * v5：消费计划备忘录（两张新表）+ 两处分类治理。
+     *
+     * 分类治理：
+     * 1. 「实习工资」→「工资补贴」。名字收窄到「实习」会让正式工资无处可放。
+     *    **只改仍是出厂名的那一批**：用户若在分类页自己改过名，那是有意的命名，
+     *    迁移不该把「我的工资」改回「工资补贴」。
+     * 2. 给 salary 补一个「补贴津贴」二级，原有「其他工资」顺位后移。
+     *    老库里没有这一条，不补的话新判定链写入 salary.allowance 会落到「其他工资」，
+     *    用户就分不出餐补和月薪。
+     */
+    this.version(5)
+      .stores({
+        plans: 'id, status, kind, sort',
+        plan_entries: 'id, plan_id, tx_id',
+      })
+      .upgrade(async (tx) => {
+        const categories = tx.table<Category>('categories');
+        await categories.toCollection().modify((row) => {
+          if (row.l1_id === 'salary' && row.l1_name === '实习工资') row.l1_name = '工资补贴';
+        });
+        const salaryRows = await categories.where('l1_id').equals('salary').toArray();
+        const template = salaryRows[0];
+        if (template && template.l1_name === '实习工资') {
+          // 上面 modify 在 IndexedDB 里是原地改的，这里再兜一次：读到旧名说明改写没生效
+          await categories.toCollection().modify((row) => {
+            if (row.l1_id === 'salary') row.l1_name = '工资补贴';
+          });
+        }
+        if (salaryRows.length > 0 && !salaryRows.some((row) => row.l2_id === 'allowance')) {
+          const fallback = salaryRows[0];
+          await categories.put({
+            id: 'salary.allowance',
+            l1_id: 'salary',
+            l1_name: '工资补贴',
+            l2_id: 'allowance',
+            l2_name: '补贴津贴',
+            direction_scope: 'income',
+            sort: 2,
+            icon: fallback.icon || '🏢',
+            builtin: true,
+            archived: false,
+          });
+          const other = salaryRows.find((row) => row.l2_id === 'other');
+          if (other) await categories.update(other.id, { sort: 3 });
+        }
       });
   }
 }

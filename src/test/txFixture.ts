@@ -12,6 +12,10 @@ interface Input {
   account_id?: string;
   source?: Transaction['source'];
   source_refs?: Transaction['source_refs'];
+  /** 收入来源识别与计划归类的用例需要它们 */
+  counterparty?: string;
+  note?: string;
+  deleted_at?: string;
 }
 
 export function makeTx(input: Input): Transaction {
@@ -31,6 +35,8 @@ export function makeTx(input: Input): Transaction {
     category_l2: input.l2 ?? 'lunch',
     account_id: input.account_id ?? 'acc_huabei',
     payment_channel: 'huabei',
+    counterparty: input.counterparty,
+    note: input.note,
     flags: input.flags ?? [],
     manual_edited: false,
     category_locked: false,
@@ -38,5 +44,6 @@ export function makeTx(input: Input): Transaction {
     imported_at: input.at,
     created_at: input.at,
     updated_at: input.at,
+    deleted_at: input.deleted_at,
   };
 }

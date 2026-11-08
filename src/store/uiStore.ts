@@ -92,6 +92,15 @@ interface UiState {
   setQuickAddOpen: (open: boolean) => void;
   editingTxId: string | null;
   setEditingTxId: (id: string | null) => void;
+  /**
+   * 隐藏右下角「记一笔」悬浮球。
+   *
+   * 流水批量模式下它会压住行右侧的金额：悬浮球是 fixed 的，滚到哪都盖住那一块，
+   * 而用户在批量核对金额时恰恰最需要看清这个数。底部操作条已经提供了全部动作，
+   * 这时候收起悬浮球是净收益。
+   */
+  fabHidden: boolean;
+  setFabHidden: (hidden: boolean) => void;
   dataVersion: number;
   bumpLocalVersion: () => void;
 }
@@ -147,6 +156,8 @@ export const useUiStore = create<UiState>((set) => ({
   setQuickAddOpen: (open) => set({ quickAddOpen: open }),
   editingTxId: null,
   setEditingTxId: (id) => set({ editingTxId: id }),
+  fabHidden: false,
+  setFabHidden: (hidden) => set({ fabHidden: hidden }),
   dataVersion: 1,
   bumpLocalVersion: () => set((state) => ({ dataVersion: state.dataVersion + 1 })),
 }));

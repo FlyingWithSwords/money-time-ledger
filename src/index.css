@@ -42,6 +42,25 @@ select {
   scrollbar-width: thin;
 }
 
+/*
+ * 拖拽进行中的全局约束。
+ *
+ * touch-action: none 是必需的：不加的话手指拖动会先被浏览器解释成「滚动页面」，
+ * pointermove 派发到一半就被取消，浮层卡在原地、松手后落点算错。
+ * user-select: none 顺手关掉，否则桌面端按住拖动会把整行文字刷成蓝色选中态，
+ * 松手时浮层消失了、一片蓝色还留在列表上。
+ */
+body.dnd-active {
+  touch-action: none;
+  -webkit-user-select: none;
+  user-select: none;
+  cursor: grabbing;
+}
+
+body.dnd-active * {
+  cursor: grabbing !important;
+}
+
 /* 启动占位的进度条（此时 ThemeProvider 尚未挂载，只能用全局 CSS 动画） */
 @keyframes boot-indeterminate {
   0% {

@@ -171,13 +171,19 @@ export const INCOME_TREE: L1Def[] = [
     ],
   },
   {
+    /**
+     * 原为「实习工资」。名字收窄到「实习」会让正式工资、试用期工资无处可放，
+     * 用户每次导入都得手工改一次分类；改成「工资补贴」后工资与各类补贴同处一个一级，
+     * 二级再分月薪/奖金/补贴，筛选与统计都不用改代码。
+     */
     id: 'salary',
-    name: '实习工资',
+    name: '工资补贴',
     icon: '🏢',
     scope: 'income',
     l2: [
       { id: 'monthly', name: '月薪' },
       { id: 'bonus', name: '奖金' },
+      { id: 'allowance', name: '补贴津贴' },
       { id: 'other', name: '其他工资' },
     ],
   },

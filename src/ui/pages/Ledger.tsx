@@ -4,14 +4,23 @@ import RestoreIcon from '@mui/icons-material/Restore';
 import SearchIcon from '@mui/icons-material/Search';
 import StarBorderIcon from '@mui/icons-material/StarBorder';
 import StarIcon from '@mui/icons-material/Star';
+import CheckIcon from '@mui/icons-material/Check';
+import CloseIcon from '@mui/icons-material/Close';
 import {
   Alert,
   Box,
   Button,
+  Checkbox,
   Chip,
+  Dialog,
+  DialogActions,
+  DialogContent,
+  DialogTitle,
   Divider,
   IconButton,
   InputAdornment,
+  ListItemButton,
+  ListItemText,
   MenuItem,
   Stack,
   TextField,
@@ -19,7 +28,8 @@ import {
   Typography,
 } from '@mui/material';
 import { useLiveQuery } from 'dexie-react-hooks';
-import { useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
+import * as planRepo from '../../db/repos/planRepo';
 import * as settingsRepo from '../../db/repos/settingsRepo';
 import * as transactionRepo from '../../db/repos/transactionRepo';
 import { dayNetExpenseCents, groupByDate, isActiveTx } from '../../domain/txUtils';
@@ -48,11 +58,15 @@ import {
   type Transaction,
 } from '../../types';
 import { useUiStore } from '../../store/uiStore';
+import { shouldSuppressClick } from '../../store/dragStore';
 import { ConfirmDialog } from '../components/ConfirmDialog';
 import { EmptyState } from '../components/EmptyState';
 import { FlagChips } from '../components/FlagChips';
 import { TimeCostLine } from '../components/TimeCostLine';
+import { useDragSource, useDropTarget } from '../dnd/useDragSource';
 import { useCategoryTree, useWageResult, useWageSettings } from '../hooks/useLedgerData';
+import type { CategoryTree } from '../../db/repos/categoryRepo';
+import { PLAN_KIND_LABEL, type Plan } from '../../types';
 
 /**
  * P2 流水：按日分组（日期 + 当日合计），行内展示分类 / 金额 / 渠道 / 来源 / 时间成本 / 标记。
@@ -77,6 +91,150 @@ export function Ledger(): JSX.Element {
   const [pendingDelete, setPendingDelete] = useState<Transaction | null>(null);
   /** 所有异步写共用的闸门，避免连点重复提交。 */
   const [busy, setBusy] = useState(false);
+
+  /**
+   * 批量模式。
+   *
+   * 记账是碎片时间做的事：一次导入后往往要连着改十几笔的分类，
+   * 逐笔点开编辑框是这条路径上最慢的一环。批量模式的全部目的就是
+   * 「一次多选、一次落地」，所以它不做二次确认，删除后靠可撤销的提示兜底。
+   */
+  const [batch, setBatch] = useState(false);
+  const [selected, setSelected] = useState<string[]>([]);
+  /** 待选二级的一级分类：拖到分类 chip 或点它时打开 */
+  const [pendingL1, setPendingL1] = useState<string | null>(null);
+  /** 这次要改的是哪几笔（拖拽的可能是没勾选的那一行） */
+  const [pendingIds, setPendingIds] = useState<string[]>([]);
+  const [noteOpen, setNoteOpen] = useState(false);
+  const [noteText, setNoteText] = useState('');
+  const plans = useLiveQuery(() => planRepo.list(), [], []) ?? [];
+
+  /**
+   * 批量模式下收起右下角悬浮球。
+   *
+   * 它是 fixed 的，滚到哪都盖住行右侧的金额；而批量核对时用户最需要看清的就是这个数。
+   * 卸载时（离开流水页）一定要还原，否则用户回到总览会发现「记一笔」不见了。
+   */
+  const setFabHidden = useUiStore((state) => state.setFabHidden);
+  useEffect(() => {
+    setFabHidden(batch);
+    return () => setFabHidden(false);
+  }, [batch, setFabHidden]);
+
+  const l1Name = (id: string): string => tree.l1List.find((item) => item.id === id)?.name ?? id;
+  const l2Name = (l1: string, l2: string): string =>
+    tree.byL1.get(l1)?.find((item) => item.l2_id === l2)?.l2_name ?? l2;
+
+  const exitBatch = (): void => {
+    setBatch(false);
+    setSelected([]);
+  };
+
+  const toggleSelect = (id: string): void => {
+    setSelected((prev) => (prev.includes(id) ? prev.filter((item) => item !== id) : [...prev, id]));
+  };
+
+  const applyCategory = async (ids: readonly string[], l1: string, l2: string): Promise<void> => {
+    if (ids.length === 0 || busy) return;
+    setBusy(true);
+    try {
+      const changed = await transactionRepo.bulkUpdateCategory(ids, l1, l2);
+      await settingsRepo.bumpDataVersion();
+      showSnack({ message: `已把 ${changed} 笔改成「${l1Name(l1)} · ${l2Name(l1, l2)}」`, severity: 'success' });
+      exitBatch();
+    } catch (error) {
+      showSnack({ message: `操作失败：${error instanceof Error ? error.message : String(error)}`, severity: 'error' });
+    } finally {
+      setBusy(false);
+      setPendingL1(null);
+      setPendingIds([]);
+    }
+  };
+
+  /** 打开二级选择：拖到 chip 与点 chip 走同一条路径，行为可预期。 */
+  const startAssign = (l1: string, ids: readonly string[]): void => {
+    if (ids.length === 0) {
+      showSnack({ message: '先勾选或拖动至少一笔', severity: 'info' });
+      return;
+    }
+    setPendingIds([...ids]);
+    setPendingL1(l1);
+  };
+
+  const applyDelete = async (): Promise<void> => {
+    if (selected.length === 0 || busy) return;
+    const ids = [...selected];
+    setBusy(true);
+    try {
+      const changed = await transactionRepo.bulkSoftDelete(ids);
+      await settingsRepo.bumpDataVersion();
+      exitBatch();
+      showSnack({
+        message: `已删除 ${changed} 笔`,
+        severity: 'info',
+        actionLabel: '撤销',
+        onAction: () => {
+          void transactionRepo.bulkRestore(ids).then(() => settingsRepo.bumpDataVersion());
+        },
+      });
+    } catch (error) {
+      showSnack({ message: `操作失败：${error instanceof Error ? error.message : String(error)}`, severity: 'error' });
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const applyNote = async (): Promise<void> => {
+    const text = noteText.trim();
+    if (!text || selected.length === 0 || busy) return;
+    setBusy(true);
+    try {
+      const changed = await transactionRepo.bulkAppendNote(selected, text);
+      await settingsRepo.bumpDataVersion();
+      setNoteOpen(false);
+      setNoteText('');
+      exitBatch();
+      showSnack({ message: `已给 ${changed} 笔加上备注`, severity: 'success' });
+    } catch (error) {
+      showSnack({ message: `操作失败：${error instanceof Error ? error.message : String(error)}`, severity: 'error' });
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const applyPlan = async (plan: Plan, ids: readonly string[]): Promise<void> => {
+    if (ids.length === 0 || busy) return;
+    const items = (rows ?? []).filter((tx) => ids.includes(tx.id));
+    const compatible =
+      plan.kind === 'save'
+        ? items.filter((tx) => tx.direction === 'income')
+        : items.filter((tx) => tx.direction === 'expense' || tx.direction === 'refund');
+    if (compatible.length === 0) {
+      showSnack({
+        message: plan.kind === 'save' ? `「${plan.title}」是攒钱计划，只累计收入记录` : `「${plan.title}」是消费计划，只累计支出记录`,
+        severity: 'warning',
+      });
+      return;
+    }
+    setBusy(true);
+    try {
+      const added = await planRepo.link(
+        plan.id,
+        compatible.map((tx) => tx.id),
+      );
+      await settingsRepo.bumpDataVersion();
+      const skipped = items.length - compatible.length;
+      exitBatch();
+      showSnack({
+        message: skipped > 0 ? `已加入「${plan.title}」${added} 笔（${skipped} 笔方向不符未计入）` : `已加入「${plan.title}」${added} 笔`,
+        severity: 'success',
+      });
+    } catch (error) {
+      showSnack({ message: `操作失败：${error instanceof Error ? error.message : String(error)}`, severity: 'error' });
+    } finally {
+      setBusy(false);
+    }
+  };
 
   const monthsWithData = useLiveQuery(() => transactionRepo.monthsWithData(), [], []) ?? [];
 
@@ -154,6 +312,12 @@ export function Ledger(): JSX.Element {
     [rows],
   );
   const breakdown = useMemo(() => sourceBreakdown(rows ?? []), [rows]);
+
+  /** 选中金额合计：拖动多笔时浮层显示的是这笔账一共多少钱，不是单笔。 */
+  const selectedTotal = useMemo(
+    () => (rows ?? []).filter((tx) => selected.includes(tx.id)).reduce((sum, tx) => sum + tx.amount_cents, 0),
+    [rows, selected],
+  );
 
   /** 删除的原有写路径保持不变，只是改由确认框触发。 */
   const performDelete = async (tx: Transaction): Promise<void> => {
@@ -235,6 +399,14 @@ export function Ledger(): JSX.Element {
             </Typography>
           )}
         </Box>
+        <Button
+          size="small"
+          variant={batch ? 'contained' : 'outlined'}
+          onClick={() => (batch ? exitBatch() : setBatch(true))}
+          sx={{ flexShrink: 0 }}
+        >
+          {batch ? '退出批量' : '批量'}
+        </Button>
       </Box>
 
       <Stack spacing={1} sx={{ mb: 1.5 }}>
@@ -478,6 +650,83 @@ export function Ledger(): JSX.Element {
         </Stack>
       </Stack>
 
+      {/*
+        批量工具栏：sticky 到顶部，因为拖拽的落点就在这里。
+        不 sticky 的话用户往下翻两屏后再拖，目标已经在屏幕外，拖动等于白做。
+      */}
+      {batch && (
+        <Box
+          sx={{
+            position: 'sticky',
+            top: 0,
+            zIndex: 4,
+            bgcolor: 'background.default',
+            py: 1,
+            mb: 1,
+            borderBottom: '1px solid',
+            borderColor: 'divider',
+          }}
+        >
+          <Typography variant="caption" color="text.secondary">
+            {selected.length > 0
+              ? `已选 ${selected.length} 笔：点下面的分类落地，或把行拖到分类/计划上`
+              : '点行左边的方框多选；也可以按住一行拖到下面的分类或计划上'}
+          </Typography>
+          <Box
+            sx={{
+              display: 'flex',
+              gap: 0.75,
+              overflowX: 'auto',
+              mt: 0.75,
+              pb: 0.25,
+              '&::-webkit-scrollbar': { display: 'none' },
+              scrollbarWidth: 'none',
+            }}
+          >
+            {tree.l1List.map((item) => (
+              <L1DropChip
+                key={item.id}
+                id={item.id}
+                label={`${item.icon} ${item.name}`}
+                onClick={() => startAssign(item.id, selected)}
+                onDrop={(ids) => startAssign(item.id, ids)}
+              />
+            ))}
+          </Box>
+          {plans.some((plan) => plan.status === 'active') && (
+            <Box
+              sx={{
+                display: 'flex',
+                gap: 0.75,
+                overflowX: 'auto',
+                mt: 0.75,
+                pb: 0.25,
+                '&::-webkit-scrollbar': { display: 'none' },
+                scrollbarWidth: 'none',
+              }}
+            >
+              <Typography
+                variant="caption"
+                color="text.secondary"
+                sx={{ flexShrink: 0, alignSelf: 'center', mr: 0.5, whiteSpace: 'nowrap' }}
+              >
+                加入计划
+              </Typography>
+              {plans
+                .filter((plan) => plan.status === 'active')
+                .map((plan) => (
+                  <PlanDropChip
+                    key={plan.id}
+                    plan={plan}
+                    onClick={() => void applyPlan(plan, selected)}
+                    onDrop={(ids) => void applyPlan(plan, ids)}
+                  />
+                ))}
+            </Box>
+          )}
+        </Box>
+      )}
+
       {lastDeleted && (
         <Alert
           severity="info"
@@ -534,7 +783,15 @@ export function Ledger(): JSX.Element {
                       wage={wage}
                       settings={settings}
                       flags={flagsFor(tx, flags)}
+                      tree={tree}
                       disabled={busy}
+                      batch={batch}
+                      selected={selected.includes(tx.id)}
+                      dragIds={selected.length > 1 && selected.includes(tx.id) ? selected : [tx.id]}
+                      dragCents={
+                        selected.length > 1 && selected.includes(tx.id) ? selectedTotal : tx.amount_cents
+                      }
+                      onToggleSelect={() => toggleSelect(tx.id)}
                       onEdit={() => setEditingTxId(tx.id)}
                       onDelete={() => setPendingDelete(tx)}
                       onToggleWorthless={() => void toggleWorthless(tx)}
@@ -559,7 +816,7 @@ export function Ledger(): JSX.Element {
                 sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', px: 1.5, py: 1 }}
               >
                 <Typography variant="body2" color="text.secondary">
-                  {tx.occurred_date} · {tx.category_l2} · {formatCents(tx.amount_cents)}
+                  {tx.occurred_date} · {labelOf(tx, tree)} · {formatCents(tx.amount_cents)}
                 </Typography>
                 <Button size="small" disabled={busy} onClick={() => void handleRestore(tx)}>
                   恢复
@@ -586,7 +843,175 @@ export function Ledger(): JSX.Element {
           if (!busy) setPendingDelete(null);
         }}
       />
+
+      {/*
+        批量操作条固定在底部：选中几笔之后拇指就在列表下半部分，
+        操作放顶部的话每次都要跨半屏回去点。
+      */}
+      {batch && (
+        <Box
+          sx={{
+            position: 'fixed',
+            left: 0,
+            right: 0,
+            bottom: 0,
+            zIndex: 1300,
+            bgcolor: 'background.paper',
+            borderTop: '1px solid',
+            borderColor: 'divider',
+            pb: 'env(safe-area-inset-bottom, 0px)',
+          }}
+        >
+          <Box
+            sx={{
+              maxWidth: 1080,
+              mx: 'auto',
+              display: 'flex',
+              alignItems: 'center',
+              gap: 1,
+              px: 2,
+              py: 1,
+              overflowX: 'auto',
+            }}
+          >
+            <Typography variant="body2" sx={{ fontWeight: 700, flexShrink: 0, whiteSpace: 'nowrap' }}>
+              {selected.length} 笔
+            </Typography>
+            <Button size="small" disabled={busy || selected.length === 0} onClick={() => setNoteOpen(true)}>
+              加备注
+            </Button>
+            <Button
+              size="small"
+              color="error"
+              disabled={busy || selected.length === 0}
+              onClick={() => void applyDelete()}
+            >
+              删除
+            </Button>
+            <Button size="small" onClick={() => setSelected((rows ?? []).map((tx) => tx.id))}>
+              全选本页
+            </Button>
+            <Box sx={{ flex: 1 }} />
+            <Button size="small" variant="contained" onClick={exitBatch}>
+              完成
+            </Button>
+          </Box>
+        </Box>
+      )}
+
+      <Dialog
+        open={pendingL1 !== null}
+        onClose={() => {
+          setPendingL1(null);
+          setPendingIds([]);
+        }}
+        fullWidth
+        maxWidth="xs"
+      >
+        <DialogTitle sx={{ fontSize: 18 }}>
+          归到「{pendingL1 ? l1Name(pendingL1) : ''}」的哪一类？（{pendingIds.length} 笔）
+        </DialogTitle>
+        <DialogContent>
+          <Stack>
+            {(pendingL1 ? tree.byL1.get(pendingL1) ?? [] : []).map((category) => (
+              <ListItemButton
+                key={category.id}
+                disabled={busy}
+                onClick={() => void applyCategory(pendingIds, pendingL1 ?? '', category.l2_id)}
+              >
+                <ListItemText primary={category.l2_name} primaryTypographyProps={{ fontSize: 14 }} />
+              </ListItemButton>
+            ))}
+          </Stack>
+        </DialogContent>
+        <DialogActions>
+          <Button
+            onClick={() => {
+              setPendingL1(null);
+              setPendingIds([]);
+            }}
+          >
+            取消
+          </Button>
+        </DialogActions>
+      </Dialog>
+
+      <Dialog open={noteOpen} onClose={() => (busy ? undefined : setNoteOpen(false))} fullWidth maxWidth="xs">
+        <DialogTitle sx={{ fontSize: 18 }}>给 {selected.length} 笔加备注</DialogTitle>
+        <DialogContent>
+          <TextField
+            autoFocus
+            fullWidth
+            label="备注"
+            value={noteText}
+            onChange={(event) => setNoteText(event.target.value)}
+            InputLabelProps={{ shrink: true }}
+            helperText="追加在原备注后面，不会覆盖账单原文；同一句话不会重复加"
+            sx={{ mt: 1 }}
+          />
+        </DialogContent>
+        <DialogActions>
+          <Button disabled={busy} onClick={() => setNoteOpen(false)}>
+            取消
+          </Button>
+          <Button variant="contained" disabled={busy || !noteText.trim()} onClick={() => void applyNote()}>
+            保存
+          </Button>
+        </DialogActions>
+      </Dialog>
     </>
+  );
+}
+
+/** 分类投放 chip：拖上去或点一下，都进入「选二级」这一步。 */
+function L1DropChip({
+  id,
+  label,
+  onClick,
+  onDrop,
+}: {
+  id: string;
+  label: string;
+  onClick: () => void;
+  onDrop: (ids: string[]) => void;
+}): JSX.Element {
+  const { active, dropProps } = useDropTarget(`ledger:l1:${id}`, (payload) => onDrop(payload.txIds));
+  return (
+    <Box {...dropProps} sx={{ flexShrink: 0 }}>
+      <Chip
+        label={label}
+        size="small"
+        clickable
+        color={active ? 'primary' : 'default'}
+        variant={active ? 'filled' : 'outlined'}
+        onClick={onClick}
+      />
+    </Box>
+  );
+}
+
+/** 计划投放 chip：拖上去即加入该计划，点一下则把当前选中项加入。 */
+function PlanDropChip({
+  plan,
+  onClick,
+  onDrop,
+}: {
+  plan: Plan;
+  onClick: () => void;
+  onDrop: (ids: string[]) => void;
+}): JSX.Element {
+  const { active, dropProps } = useDropTarget(`ledger:plan:${plan.id}`, (payload) => onDrop(payload.txIds));
+  return (
+    <Box {...dropProps} sx={{ flexShrink: 0 }}>
+      <Chip
+        label={`${plan.title} · ${PLAN_KIND_LABEL[plan.kind]}`}
+        size="small"
+        clickable
+        color={active ? 'primary' : 'default'}
+        variant={active ? 'filled' : 'outlined'}
+        onClick={onClick}
+      />
+    </Box>
   );
 }
 
@@ -619,14 +1044,38 @@ interface RowProps {
   wage: ReturnType<typeof useWageResult>;
   settings: ReturnType<typeof useWageSettings>;
   flags: ReturnType<typeof flagsFor>;
+  /** 二级分类要按 ID 反查中文名，不能把 'digital' 直接糊在界面上 */
+  tree: CategoryTree;
   /** 有异步写在飞时禁用整行操作，防连点重复提交。 */
   disabled: boolean;
+  /** 批量模式：左侧出现勾选框，点行即切换选中 */
+  batch: boolean;
+  selected: boolean;
+  /** 拖动时带走哪几笔（行已被选中则带走整批） */
+  dragIds: string[];
+  dragCents: number;
+  onToggleSelect: () => void;
   onEdit: () => void;
   onDelete: () => void;
   onToggleWorthless: () => void;
 }
 
-function TxRow({ tx, wage, settings, flags, disabled, onEdit, onDelete, onToggleWorthless }: RowProps): JSX.Element {
+function TxRow({
+  tx,
+  wage,
+  settings,
+  flags,
+  tree,
+  disabled,
+  batch,
+  selected,
+  dragIds,
+  dragCents,
+  onToggleSelect,
+  onEdit,
+  onDelete,
+  onToggleWorthless,
+}: RowProps): JSX.Element {
   const startX = useRef<number | null>(null);
   const marked = (tx.flags ?? []).includes('most_worthless');
   const sign = tx.direction === 'expense' ? '-' : tx.direction === 'income' ? '+' : '';
@@ -636,8 +1085,26 @@ function TxRow({ tx, wage, settings, flags, disabled, onEdit, onDelete, onToggle
   const sources = provenanceOf(tx);
   const multi = sources.length > 1;
 
+  /**
+   * 拖拽源。批量模式外也能拖：触摸端靠 220ms 长按区分「拖」与「滑」，
+   * 桌面靠移动 6px 区分「拖」与「点」，误触已经隔离掉了。
+   */
+  const { onPointerDown } = useDragSource({
+    kind: 'tx',
+    txIds: dragIds,
+    label: dragIds.length > 1 ? `${dragIds.length} 笔` : tx.counterparty || labelOf(tx, tree),
+    direction: tx.direction,
+    cents: dragCents as Transaction['amount_cents'],
+  });
+
   return (
     <Box
+      onPointerDown={disabled ? undefined : onPointerDown}
+      onClick={() => {
+        // 刚拖完的那次松手不该被当成点击：否则拖到分类后会立刻弹一次编辑框
+        if (shouldSuppressClick()) return;
+        if (batch) onToggleSelect();
+      }}
       onTouchStart={(event) => {
         startX.current = event.touches[0]?.clientX ?? null;
       }}
@@ -645,18 +1112,41 @@ function TxRow({ tx, wage, settings, flags, disabled, onEdit, onDelete, onToggle
         if (startX.current === null) return;
         const delta = (event.changedTouches[0]?.clientX ?? 0) - startX.current;
         startX.current = null;
+        // 批量模式下不做滑动手势：多选时手常常是斜着划过去的，误触发太吵
+        if (batch) return;
         if (delta < -60) onEdit();
         if (delta > 60) onToggleWorthless();
       }}
-      sx={{ display: 'flex', gap: 1, px: 1.5, py: 1.1, alignItems: 'flex-start', '&:hover': { bgcolor: 'action.hover' } }}
+      sx={{
+        display: 'flex',
+        gap: 1,
+        px: 1.5,
+        py: 1.1,
+        alignItems: 'flex-start',
+        cursor: batch ? 'pointer' : undefined,
+        bgcolor: selected ? 'action.selected' : undefined,
+        '&:hover': { bgcolor: selected ? 'action.selected' : 'action.hover' },
+      }}
     >
+      {batch && (
+        <Box
+          onPointerDown={(event) => event.stopPropagation()}
+          onClick={(event) => {
+            event.stopPropagation();
+            onToggleSelect();
+          }}
+          sx={{ display: 'flex', alignItems: 'center', alignSelf: 'stretch', mr: -0.5 }}
+        >
+          <Checkbox size="small" checked={selected} sx={{ p: 0.5 }} inputProps={{ 'aria-label': '勾选这一笔' }} />
+        </Box>
+      )}
       <Box sx={{ fontSize: 20, lineHeight: '24px', width: 24, textAlign: 'center' }}>{icon}</Box>
       <Box sx={{ flex: 1, minWidth: 0 }}>
         <Typography variant="body2" sx={{ fontWeight: 600, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-          {tx.counterparty || labelOf(tx)}
+          {tx.counterparty || labelOf(tx, tree)}
         </Typography>
         <Typography variant="caption" color="text.secondary" sx={{ display: 'block' }}>
-          {tx.occurred_at.slice(11, 16)} · {labelOf(tx)}
+          {tx.occurred_at.slice(11, 16)} · {labelOf(tx, tree)}
           {tx.direction !== 'expense' ? ` · ${DIRECTION_LABEL[tx.direction]}` : ''}
           {tx.payment_channel ? ` · ${CHANNEL_LABEL[tx.payment_channel as keyof typeof CHANNEL_LABEL] ?? tx.payment_channel}` : ''}
         </Typography>
@@ -695,22 +1185,30 @@ function TxRow({ tx, wage, settings, flags, disabled, onEdit, onDelete, onToggle
         </Typography>
         <TimeCostLine cents={tx.amount_cents} settings={settings} wage={wage} />
       </Box>
-      <Stack direction="row" sx={{ ml: 0.5 }}>
-        <IconButton size="small" disabled={disabled} aria-label={marked ? '取消最不值' : '标记最不值'} onClick={onToggleWorthless}>
-          {marked ? <StarIcon fontSize="small" color="secondary" /> : <StarBorderIcon fontSize="small" />}
-        </IconButton>
-        <IconButton size="small" disabled={disabled} aria-label="编辑" onClick={onEdit}>
-          <EditOutlinedIcon fontSize="small" />
-        </IconButton>
-        <IconButton size="small" disabled={disabled} aria-label="删除" onClick={onDelete}>
-          <DeleteOutlineIcon fontSize="small" />
-        </IconButton>
-      </Stack>
+      {/*
+        批量模式下收起行内的三个单操作按钮。
+        它们和勾选框同时出现时，390px 宽的手机上留给分类信息只剩 100px 左右，
+        「09:00 · 淘宝 · 银行卡」被挤成三行——而这一行的操作本来就已经交给底部操作条了。
+      */}
+      {!batch && (
+        <Stack direction="row" sx={{ ml: 0.5 }}>
+          <IconButton size="small" disabled={disabled} aria-label={marked ? '取消最不值' : '标记最不值'} onClick={onToggleWorthless}>
+            {marked ? <StarIcon fontSize="small" color="secondary" /> : <StarBorderIcon fontSize="small" />}
+          </IconButton>
+          <IconButton size="small" disabled={disabled} aria-label="编辑" onClick={onEdit}>
+            <EditOutlinedIcon fontSize="small" />
+          </IconButton>
+          <IconButton size="small" disabled={disabled} aria-label="删除" onClick={onDelete}>
+            <DeleteOutlineIcon fontSize="small" />
+          </IconButton>
+        </Stack>
+      )}
     </Box>
   );
 }
 
-function labelOf(tx: Transaction): string {
-  const name = tx.category_l2;
-  return name || '未分类';
+function labelOf(tx: Transaction, tree: CategoryTree): string {
+  // category_l2 存的是 ID（'digital'/'monthly'），直接显示出来就是满屏英文
+  const name = tree.byL1.get(tx.category_l1)?.find((item) => item.l2_id === tx.category_l2)?.l2_name;
+  return name ?? tx.category_l2 ?? '未分类';
 }

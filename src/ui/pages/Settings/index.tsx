@@ -174,6 +174,12 @@ export function SettingsPage(): JSX.Element {
             <Divider />
             <Item label="关键词自动归类规则" hint="可见、可编辑、可停用" onClick={() => navigate('/settings/rules')} />
             <Divider />
+            <Item
+              label="工资与补贴来源"
+              hint="哪些转账记录算收入（银行卡转微信/支付宝常被记成转账）"
+              onClick={() => navigate('/settings/income')}
+            />
+            <Divider />
             <Item label="储蓄目标" hint="换手机 3000 元 / 12 月底" onClick={() => navigate('/settings/goals')} />
             <Divider />
             <Item label="备份与导出" hint="加密备份 / 未加密 CSV" onClick={() => navigate('/settings/backup')} />

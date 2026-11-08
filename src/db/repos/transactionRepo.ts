@@ -105,6 +105,128 @@ export async function softDelete(id: string): Promise<void> {
   await db.transactions.update(id, { deleted_at: now, updated_at: now });
 }
 
+/**
+ * 把一批记录改判为收入并落到指定分类（工资/补贴）。
+ *
+ * 只改方向、分类与锁定标记，金额与日期不动——用户是在纠正「这笔被平台记成了转账」，
+ * 不是在改账。退款行直接跳过：钱已经回来了，再判成收入会和退款冲减重复计算。
+ * 返回实际发生变化的条数（已经是对的就不重复写，避免无意义的 updated_at 抖动）。
+ */
+export async function markIncome(ids: readonly string[], l1: string, l2: string): Promise<number> {
+  if (ids.length === 0) return 0;
+  const now = new Date().toISOString();
+  let changed = 0;
+  await db.transaction('rw', db.transactions, async () => {
+    for (const id of ids) {
+      const tx = await db.transactions.get(id);
+      if (!tx || tx.direction === 'refund') continue;
+      if (tx.direction === 'income' && tx.category_l1 === l1 && tx.category_l2 === l2) continue;
+      await db.transactions.update(id, {
+        direction: 'income',
+        category_l1: l1,
+        category_l2: l2,
+        category_locked: true,
+        manual_edited: true,
+        updated_at: now,
+      });
+      changed += 1;
+    }
+  });
+  return changed;
+}
+
+/**
+ * 批量改分类：一次写一批，单事务。
+ *
+ * 逐条 update 而不是 bulkUpdate，是因为要**保留**原有的 other 字段（flags 等）；
+ * bulkUpdate 的 changes 是浅合并，本身没问题，但拿不到「这个 id 是否存在」的判断，
+ * 会把已删除/不存在的 id 静默吞掉，界面上就变成「点了没反应」。
+ */
+export async function bulkUpdateCategory(ids: readonly string[], l1: string, l2: string): Promise<number> {
+  if (ids.length === 0) return 0;
+  const now = new Date().toISOString();
+  let changed = 0;
+  await db.transaction('rw', db.transactions, async () => {
+    for (const id of ids) {
+      const tx = await db.transactions.get(id);
+      if (!tx) continue;
+      await db.transactions.update(id, {
+        category_l1: l1,
+        category_l2: l2,
+        category_locked: true,
+        manual_edited: true,
+        updated_at: now,
+      });
+      changed += 1;
+    }
+  });
+  return changed;
+}
+
+/**
+ * 批量删除（软删）。返回实际删除的条数。
+ *
+ * 已经删过的跳过：背包里选中的行可能包含上一次操作后已被别处删掉的，
+ * 重复写 deleted_at 会让「撤销」提示显示的条数虚高。
+ */
+export async function bulkSoftDelete(ids: readonly string[]): Promise<number> {
+  if (ids.length === 0) return 0;
+  const now = new Date().toISOString();
+  let changed = 0;
+  await db.transaction('rw', db.transactions, async () => {
+    for (const id of ids) {
+      const tx = await db.transactions.get(id);
+      if (!tx || tx.deleted_at) continue;
+      await db.transactions.update(id, { deleted_at: now, updated_at: now });
+      changed += 1;
+    }
+  });
+  return changed;
+}
+
+/**
+ * 批量加备注：**追加**而不是覆盖。
+ *
+ * 原有备注往往是账单原文（「美团-外卖订单」「退款」），覆盖掉等于毁掉唯一的原始凭证；
+ * 追加后用「 · 」分隔，重复追加同一句话会被跳过，避免连点两下变成「备注 · 备注」。
+ */
+export async function bulkAppendNote(ids: readonly string[], text: string): Promise<number> {
+  const note = text.trim();
+  if (ids.length === 0 || !note) return 0;
+  const now = new Date().toISOString();
+  let changed = 0;
+  await db.transaction('rw', db.transactions, async () => {
+    for (const id of ids) {
+      const tx = await db.transactions.get(id);
+      if (!tx) continue;
+      const current = tx.note ?? '';
+      if (current.includes(note)) continue;
+      await db.transactions.update(id, {
+        note: current ? `${current} · ${note}` : note,
+        manual_edited: true,
+        updated_at: now,
+      });
+      changed += 1;
+    }
+  });
+  return changed;
+}
+
+export async function bulkRestore(ids: readonly string[]): Promise<number> {
+  if (ids.length === 0) return 0;
+  const now = new Date().toISOString();
+  let changed = 0;
+  await db.transaction('rw', db.transactions, async () => {
+    for (const id of ids) {
+      const tx = await db.transactions.get(id);
+      if (!tx || !tx.deleted_at) continue;
+      await db.transactions.update(id, { deleted_at: undefined, updated_at: now });
+      changed += 1;
+    }
+  });
+  return changed;
+}
+
 export async function restore(id: string): Promise<void> {
   await db.transactions.update(id, { deleted_at: undefined, updated_at: new Date().toISOString() });
 }

@@ -12,6 +12,7 @@ import { Insight } from './ui/pages/Insight';
 import { Trends } from './ui/pages/Trends';
 import { SettingsPage } from './ui/pages/Settings';
 import { WagePage } from './ui/pages/Settings/Wage';
+import { IncomeSourcesPage } from './ui/pages/Settings/IncomeSources';
 import { CategoriesPage } from './ui/pages/Settings/Categories';
 import { RulesPage } from './ui/pages/Settings/Rules';
 import { BackupPage } from './ui/pages/Settings/Backup';
@@ -20,6 +21,7 @@ import { PrivacyPage } from './ui/pages/Settings/Privacy';
 import { ReviewPage } from './ui/pages/Review';
 import { ReconcilePage } from './ui/pages/Reconcile';
 import { AiExportPage } from './ui/pages/Settings/AiExport';
+import { PlansPage } from './ui/pages/Plans';
 import { useUiStore } from './store/uiStore';
 import * as settingsRepo from './db/repos/settingsRepo';
 
@@ -36,8 +38,10 @@ const router = createHashRouter([
       { path: 'funds', element: <Funds /> },
       { path: 'insight', element: <Insight /> },
       { path: 'trends', element: <Trends /> },
+      { path: 'plans', element: <PlansPage /> },
       { path: 'settings', element: <SettingsPage /> },
       { path: 'settings/wage', element: <WagePage /> },
+      { path: 'settings/income', element: <IncomeSourcesPage /> },
       { path: 'settings/categories', element: <CategoriesPage /> },
       { path: 'settings/rules', element: <RulesPage /> },
       { path: 'settings/backup', element: <BackupPage /> },
