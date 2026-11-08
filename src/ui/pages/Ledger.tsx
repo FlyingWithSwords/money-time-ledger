@@ -288,48 +288,70 @@ export function Ledger(): JSX.Element {
           />
         </Stack>
 
+        {/*
+          「快捷区间 chips」与「按月份」下拉合成一行：它们回答的是同一个问题
+          （看哪段时间），排在一起用户不必在两处之间来回找。
+          - chips 横向可滚动，`flex: 1 + minWidth: 0` 才能在容器里正常收缩，
+            否则 flex 子项默认 min-width: auto 会把整行撑宽、把下拉挤出屏幕；
+          - 「按月份」固定成 150px 不参与收缩，保证月份文字（YYYY-MM）不被截断；
+          - xs 下强制换行：chips 占满一行，下拉下一行占满宽度，避免 chips 被压成几个像素；
+          - `pt: 1` 是给下拉 label 上浮留的高度——MUI 的 label 有一半骑在边框上，
+            没有这段留白就会被上一行的日期输入框压住，看起来像被切掉一块。
+        */}
         <Box
           sx={{
             display: 'flex',
             alignItems: 'center',
-            gap: 0.75,
-            overflowX: 'auto',
-            flexWrap: 'nowrap',
-            '&::-webkit-scrollbar': { display: 'none' },
-            scrollbarWidth: 'none',
+            gap: 1,
+            flexWrap: { xs: 'wrap', sm: 'nowrap' },
+            pt: 1,
           }}
         >
-          {RANGE_PRESETS.map((preset) => {
-            const active = sameRange(range, preset.build());
-            return (
-              <Chip
-                key={preset.key}
-                label={preset.label}
-                size="small"
-                clickable
-                color={active ? 'primary' : 'default'}
-                variant={active ? 'filled' : 'outlined'}
-                onClick={() => applyRange(preset.build())}
-                sx={{ flexShrink: 0 }}
-              />
-            );
-          })}
-          <Chip
-            label="全部"
-            size="small"
-            clickable
-            color={sameRange(range, allRange) ? 'primary' : 'default'}
-            variant={sameRange(range, allRange) ? 'filled' : 'outlined'}
-            onClick={() => applyRange(allRange)}
-            sx={{ flexShrink: 0 }}
-          />
-        </Box>
+          <Box
+            sx={{
+              flex: { xs: '1 1 100%', sm: 1 },
+              minWidth: 0,
+              display: 'flex',
+              alignItems: 'center',
+              gap: 0.75,
+              overflowX: 'auto',
+              flexWrap: 'nowrap',
+              '&::-webkit-scrollbar': { display: 'none' },
+              scrollbarWidth: 'none',
+            }}
+          >
+            {RANGE_PRESETS.map((preset) => {
+              const active = sameRange(range, preset.build());
+              return (
+                <Chip
+                  key={preset.key}
+                  label={preset.label}
+                  size="small"
+                  clickable
+                  color={active ? 'primary' : 'default'}
+                  variant={active ? 'filled' : 'outlined'}
+                  onClick={() => applyRange(preset.build())}
+                  sx={{ flexShrink: 0 }}
+                />
+              );
+            })}
+            <Chip
+              label="全部"
+              size="small"
+              clickable
+              color={sameRange(range, allRange) ? 'primary' : 'default'}
+              variant={sameRange(range, allRange) ? 'filled' : 'outlined'}
+              onClick={() => applyRange(allRange)}
+              sx={{ flexShrink: 0 }}
+            />
+          </Box>
 
-        <Box sx={{ display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gap: 1 }}>
           {/*
             月份快捷跳转：列出**实际有数据**的月份，而不是「当前月往前推 12 个月」。
             用户原来的痛点就是列表永远只覆盖一个滚动窗口；这里的数据源换成
             monthsWithData()，账目跨多少年就能选到多少年。
+            它原来在 2 列网格里，和其余 4 个维度筛混合排 → 5 个格子排成 3 行、末行半个空格。
+            移到这里既消掉空行，也让它和 chips 语义对齐。
           */}
           <TextField
             select
@@ -341,6 +363,8 @@ export function Ledger(): JSX.Element {
               const next = event.target.value;
               if (next) applyRange(wholeMonthRange(next));
             }}
+            InputLabelProps={{ shrink: true }}
+            sx={{ flexShrink: 0, width: { xs: '100%', sm: 150 } }}
           >
             <MenuItem value="">自定义区间</MenuItem>
             {monthChoices.map((month) => (
@@ -349,6 +373,27 @@ export function Ledger(): JSX.Element {
               </MenuItem>
             ))}
           </TextField>
+        </Box>
+
+        {/*
+          剩下 4 个「筛选维度」走规整 2×2（xs 单列）：4 个正好填满，
+          不会再出现末行只有「方向」一个、右边半个格子空着的残缺感。
+          `pt: 1` 同样是给这 4 个 label 上浮留的呼吸位。
+        */}
+        <Box
+          sx={{
+            display: 'grid',
+            gridTemplateColumns: { xs: '1fr', sm: 'repeat(2, 1fr)' },
+            gap: 1,
+            pt: 1,
+          }}
+        >
+          {/*
+            下面 4 个 select 都强制 `shrink: true`：它们的值可以是空串（「全部来源 / 全部」），
+            MUI 判定「空值 = 未聚焦」就不会上浮 label，于是占位文本把 label 整个盖住，
+            屏幕上就出现三个一模一样的「全部」，用户分不清哪个是分类、哪个是渠道、哪个是方向。
+            固定上浮后，即使不展开下拉，也能从边框上的标签读出每个框的维度。
+          */}
           <TextField
             select
             SelectProps={{ displayEmpty: true }}
@@ -356,6 +401,7 @@ export function Ledger(): JSX.Element {
             label="来源"
             value={filter.source}
             onChange={(event) => setFilter({ source: event.target.value })}
+            InputLabelProps={{ shrink: true }}
           >
             <MenuItem value="">全部来源</MenuItem>
             {(Object.keys(SOURCE_LABEL) as Source[]).map((source) => (
@@ -371,6 +417,7 @@ export function Ledger(): JSX.Element {
             label="一级分类"
             value={filter.l1}
             onChange={(event) => setFilter({ l1: event.target.value })}
+            InputLabelProps={{ shrink: true }}
           >
             <MenuItem value="">全部</MenuItem>
             {tree.l1List.map((item) => (
@@ -386,6 +433,7 @@ export function Ledger(): JSX.Element {
             label="渠道"
             value={filter.channel}
             onChange={(event) => setFilter({ channel: event.target.value })}
+            InputLabelProps={{ shrink: true }}
           >
             <MenuItem value="">全部</MenuItem>
             {Object.entries(CHANNEL_LABEL).map(([value, label]) => (
@@ -401,6 +449,7 @@ export function Ledger(): JSX.Element {
             label="方向"
             value={filter.direction}
             onChange={(event) => setFilter({ direction: event.target.value as typeof filter.direction })}
+            InputLabelProps={{ shrink: true }}
           >
             <MenuItem value="">全部</MenuItem>
             {Object.entries(DIRECTION_LABEL).map(([value, label]) => (
