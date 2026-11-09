@@ -1,7 +1,7 @@
 import { db } from '../db';
 import { SETTING_KEYS } from '../settingKeys';
 import { asCents } from '../../domain/money';
-import type { IncomeSource } from '../../domain/incomeSource';
+import type { IncomeSource, IncomeSourceFilter } from '../../domain/incomeSource';
 import type { WageSettings } from '../../domain/timecost';
 import { DEFAULT_WAGE_SETTINGS } from '../../domain/timecost';
 
@@ -123,6 +123,45 @@ export async function markBackupDone(at: string): Promise<void> {
 }
 
 /**
+ * 单条来源的宽松校验。
+ *
+ * 整条丢掉的条件只有「没法用」的：关键词不是字符串、一级分类不认识。
+ * 其余字段一律给默认值——老版本存下的条目没有 `filter`、可能也没有 `label`，
+ * 丢掉它们等于让用户之前勾过的来源集体失效，账会突然少几千块收入。
+ */
+function normalizeIncomeSource(raw: unknown): IncomeSource | null {
+  if (!raw || typeof raw !== 'object') return null;
+  const item = raw as Partial<IncomeSource> & { filter?: unknown };
+  if (typeof item.keyword !== 'string' || !item.keyword.trim()) return null;
+  if (item.l1 !== 'salary' && item.l1 !== 'allowance') return null;
+  const source: IncomeSource = {
+    keyword: item.keyword,
+    label: typeof item.label === 'string' && item.label ? item.label : item.keyword,
+    l1: item.l1,
+    l2: typeof item.l2 === 'string' && item.l2 ? item.l2 : 'monthly',
+  };
+  const filter = normalizeIncomeFilter(item.filter);
+  if (filter) source.filter = filter;
+  return source;
+}
+
+/** 高级条件同样宽松：只留下类型对且非空的字段，全空就等于没设条件。 */
+function normalizeIncomeFilter(raw: unknown): IncomeSourceFilter | undefined {
+  if (!raw || typeof raw !== 'object') return undefined;
+  const input = raw as Record<string, unknown>;
+  const out: IncomeSourceFilter = {};
+  for (const key of ['min_cents', 'max_cents'] as const) {
+    const value = input[key];
+    if (typeof value === 'number' && Number.isFinite(value) && value >= 0) out[key] = Math.round(value);
+  }
+  for (const key of ['include', 'exclude'] as const) {
+    const value = input[key];
+    if (typeof value === 'string' && value.trim()) out[key] = value.trim();
+  }
+  return Object.keys(out).length > 0 ? out : undefined;
+}
+
+/**
  * 用户确认过的收入来源（工资/补贴）。
  *
  * 读的时候要防御脏数据：早期版本可能写进过字符串或对象，导入管线按数组消费，
@@ -131,13 +170,7 @@ export async function markBackupDone(at: string): Promise<void> {
 export async function getIncomeSources(): Promise<IncomeSource[]> {
   const value = await get<unknown>(SETTING_KEYS.incomeSources, []);
   if (!Array.isArray(value)) return [];
-  return value.filter(
-    (item): item is IncomeSource =>
-      !!item &&
-      typeof item === 'object' &&
-      typeof (item as IncomeSource).keyword === 'string' &&
-      ((item as IncomeSource).l1 === 'salary' || (item as IncomeSource).l1 === 'allowance'),
-  );
+  return value.map(normalizeIncomeSource).filter((item): item is IncomeSource => item !== null);
 }
 
 export async function setIncomeSources(sources: readonly IncomeSource[]): Promise<void> {

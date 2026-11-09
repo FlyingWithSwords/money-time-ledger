@@ -157,23 +157,7 @@ export function ReviewPage(): JSX.Element {
           </Typography>
         </SectionCard>
 
-        <SectionCard title="⑦ 储蓄目标进度">
-          {payload.goal_progress.length === 0 ? (
-            <Typography variant="body2" color="text.secondary">
-              还没设目标。设一个"换手机 3000 元 / 12 月底"，进度会按结余自动算。
-            </Typography>
-          ) : (
-            payload.goal_progress.map((goal) => (
-              <Row
-                key={goal.goal_id}
-                label={`完成 ${Math.round(goal.percent * 100)}%`}
-                value={goal.behind_cents > 0 ? `落后 ${amount(goal.behind_cents)}` : '按计划'}
-              />
-            ))
-          )}
-        </SectionCard>
-
-        <SectionCard title="⑧ 一句时间成本">
+        <SectionCard title="⑦ 一句时间成本">
           <Typography variant="body2">
             {payload.time_cost_line.hours > 0
               ? `这个月的支出 ≈ 你工作 ${payload.time_cost_line.hours} 小时（口径：${payload.time_cost_line.basis}）`

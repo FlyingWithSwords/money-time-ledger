@@ -1,8 +1,6 @@
-import * as goalRepo from '../db/repos/goalRepo';
 import * as reviewRepo from '../db/repos/reviewRepo';
 import * as settingsRepo from '../db/repos/settingsRepo';
 import * as transactionRepo from '../db/repos/transactionRepo';
-import { totalsOf } from '../domain/aggregate';
 import { nowIso, shiftMonth } from '../domain/date';
 import { reviewCardId, buildReviewCard } from '../domain/review';
 import { asCents } from '../domain/money';
@@ -15,10 +13,9 @@ import { resolveHourlyWage } from '../domain/timecost';
  */
 
 export async function generateReviewCard(monthKey: string): Promise<ReviewCard> {
-  const [monthTxs, prevTxs, goals, settings, realHours, allTxs] = await Promise.all([
+  const [monthTxs, prevTxs, settings, realHours, allTxs] = await Promise.all([
     transactionRepo.listByMonth(monthKey),
     transactionRepo.listByMonth(shiftMonth(monthKey, -1)),
-    goalRepo.list(),
     settingsRepo.getWageSettings(),
     settingsRepo.getRealWageHours(),
     transactionRepo.listAll(),
@@ -34,7 +31,6 @@ export async function generateReviewCard(monthKey: string): Promise<ReviewCard> 
     count: recentJobs.length,
   });
 
-  const cumulative = totalsOf(allTxs.filter((tx) => tx.month_key <= monthKey));
   const pending = monthTxs.filter(
     (tx) => tx.category_l1 === 'other' && tx.category_l2 === 'pending' && !tx.deleted_at,
   ).length;
@@ -44,8 +40,6 @@ export async function generateReviewCard(monthKey: string): Promise<ReviewCard> 
       monthKey,
       monthTxs,
       prevMonthTxs: prevTxs,
-      goals,
-      cumulativeSavingsCents: cumulative.balance_cents,
       wage,
       workdayHours: settings.workday_hours,
       pendingUncategorized: pending,

@@ -300,7 +300,6 @@ export interface ReviewPayload {
   most_worthless: Array<{ id: string; cents: Cents }>;
   impulse: { count: number; cents: Cents; ratio: number; kinds: Record<string, number> };
   mom: { expense_delta_cents: Cents; expense_delta_ratio: number };
-  goal_progress: Array<{ goal_id: string; percent: number; behind_cents: Cents }>;
   time_cost_line: { hours: number; basis: string };
   pending_uncategorized: number;
 }

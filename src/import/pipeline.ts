@@ -193,13 +193,23 @@ export async function runImport(file: ImportFile, opts: ImportOptions = {}): Pro
      * 优先级低于投资本金——两者同时命中说明摘要里既有「基金」又有「工资」
      * （理财产品的宣传语、或者「工资到账后自动转入余额宝」），那种情况钱确实变成了持仓，
      * 不能因为摘要带「工资」就判成收入。
+     *
+     * 「交易关闭」同样不参与：状态列是平台给的权威结论，钱从头到尾没动过。
+     * 实测踩过：用户在收入来源里加了「余额宝」，一笔「余额宝-单次转入（交易关闭）」
+     * 的 15,000 元被改判成收入，账上凭空多出一笔进账。
      */
-    const incomeHit = invest.matched
-      ? null
-      : detectWhitelistedIncome(
-          { direction: row.direction, counterparty: row.counterparty, note: row.note },
-          incomeSources,
-        );
+    const incomeHit =
+      invest.matched || isClosed
+        ? null
+        : detectWhitelistedIncome(
+            {
+              direction: row.direction,
+              counterparty: row.counterparty,
+              note: row.note,
+              amount_cents: row.amount_cents,
+            },
+            incomeSources,
+          );
     if (invest.matched) {
       investRows += 1;
       investCents += row.amount_cents;

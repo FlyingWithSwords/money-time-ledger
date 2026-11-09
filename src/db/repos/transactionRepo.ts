@@ -2,6 +2,7 @@ import { db } from '../db';
 import type { Cents, Direction, Source, Transaction } from '../../types';
 import { mergeSources, provenanceOf } from '../../domain/provenance';
 import { isActiveTx } from '../../domain/txUtils';
+import { isVoidTx } from '../../domain/voidTx';
 
 /** 交易读写。所有写路径必须同步 occurred_date / month_key，且写后推进 data_version。 */
 
@@ -155,6 +156,14 @@ export async function markIncome(ids: readonly string[], l1: string, l2: string)
     for (const id of ids) {
       const tx = await db.transactions.get(id);
       if (!tx || tx.direction === 'refund') continue;
+      /**
+       * 「交易关闭」的行不改判。
+       *
+       * 这是第二道闸门：候选扫描已经排掉了这类记录，但候选是扫描那一刻的快照，
+       * 用户可能在列表里停留几分钟、期间又导入了一份账单。改判前按库里当前内容再确认一次，
+       * 免得把一笔钱没动过的交易记成收入。
+       */
+      if (isVoidTx(tx)) continue;
       if (tx.direction === 'income' && tx.category_l1 === l1 && tx.category_l2 === l2) continue;
       await db.transactions.update(id, {
         direction: 'income',
@@ -162,6 +171,46 @@ export async function markIncome(ids: readonly string[], l1: string, l2: string)
         category_l2: l2,
         category_locked: true,
         manual_edited: true,
+        updated_at: now,
+      });
+      changed += 1;
+    }
+  });
+  return changed;
+}
+
+/**
+ * 找出「被记成收入、但其实是交易关闭」的记录。
+ *
+ * 用途是把已经发生的误判捞出来给用户修：早期的收入来源判定只看关键词，
+ * 用户把「余额宝」加成收入来源后，一笔「余额宝-单次转入（交易关闭）」的 15,000 元
+ * 就被改成了收入。只修代码不修存量数据，这笔钱会一直留在收入里。
+ */
+export async function listVoidIncome(): Promise<Transaction[]> {
+  const rows = await db.transactions.where('direction').equals('income').toArray();
+  return rows.filter((row) => !row.deleted_at && isVoidTx(row));
+}
+
+/**
+ * 把误判成收入的「交易关闭」记录改回不计收支。
+ *
+ * 分类一并退回「待分类」并解锁：原来的「工资补贴 · 月薪」是误判的产物，
+ * 留在转账行上会让人以为这笔钱算进了工资——而它一分钱都没动过。
+ */
+export async function revertVoidIncome(ids: readonly string[]): Promise<number> {
+  if (ids.length === 0) return 0;
+  const now = new Date().toISOString();
+  let changed = 0;
+  await db.transaction('rw', db.transactions, async () => {
+    for (const id of ids) {
+      const tx = await db.transactions.get(id);
+      if (!tx || tx.direction !== 'income' || !isVoidTx(tx)) continue;
+      await db.transactions.update(id, {
+        direction: 'transfer',
+        category_l1: 'other',
+        category_l2: 'pending',
+        category_locked: false,
+        manual_edited: false,
         updated_at: now,
       });
       changed += 1;

@@ -180,8 +180,6 @@ export function SettingsPage(): JSX.Element {
               onClick={() => navigate('/settings/income')}
             />
             <Divider />
-            <Item label="储蓄目标" hint="换手机 3000 元 / 12 月底" onClick={() => navigate('/settings/goals')} />
-            <Divider />
             <Item label="备份与导出" hint="加密备份 / 未加密 CSV" onClick={() => navigate('/settings/backup')} />
             <Divider />
             <Item label="AI 分析数据包" hint="脱敏后自行交给任何 AI，全程不上传" onClick={() => navigate('/settings/ai')} />

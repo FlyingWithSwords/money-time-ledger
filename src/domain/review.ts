@@ -1,5 +1,5 @@
 import { daysInMonth } from './date';
-import type { Cents, Goal, ReviewCard, ReviewPayload, Transaction } from '../types';
+import type { Cents, ReviewCard, ReviewPayload, Transaction } from '../types';
 import { categoryShares, totalsOf, topExpenses } from './aggregate';
 import { computeMonthFlags, summarizeImpulse } from './flags';
 import { asCents } from './money';
@@ -13,7 +13,8 @@ import { l1Name } from './categoryTree';
  * 复盘卡是可回看/可分享的历史结论，不是实时汇总。
  */
 
-export const REVIEW_SCHEMA_VERSION = 1;
+/** v2：移除 goal_progress（储蓄目标功能已下线，由消费计划取代）。 */
+export const REVIEW_SCHEMA_VERSION = 2;
 
 export function reviewCardId(monthKey: string): string {
   return `review:${monthKey}`;
@@ -23,9 +24,6 @@ export interface ReviewInput {
   monthKey: string;
   monthTxs: readonly Transaction[];
   prevMonthTxs: readonly Transaction[];
-  goals: readonly Goal[];
-  /** 截至该月末的累计结余（分），用于储蓄目标进度 */
-  cumulativeSavingsCents: Cents;
   wage: WageResult;
   workdayHours: number;
   /** 生成时的「待分类」笔数，用于水印一致性 */
@@ -80,15 +78,6 @@ export function buildReviewPayload(input: ReviewInput): ReviewPayload {
       expense_delta_cents: asCents(momDelta),
       expense_delta_ratio: prevTotals.net_expense_cents !== 0 ? momDelta / prevTotals.net_expense_cents : 0,
     },
-    goal_progress: input.goals
-      .filter((goal) => goal.status !== 'archived')
-      .map((goal) => {
-        const percent =
-          goal.target_cents > 0 ? Math.max(0, Math.min(1, input.cumulativeSavingsCents / goal.target_cents)) : 0;
-        const expected = expectedProgressCents(goal, input.monthKey);
-        const behind = Math.max(0, expected - input.cumulativeSavingsCents);
-        return { goal_id: goal.id, percent, behind_cents: asCents(behind) };
-      }),
     time_cost_line: {
       hours: timeCost ? timeCost.hours : 0,
       basis: input.wage.basis ? WAGE_BASIS_LABEL[input.wage.basis] : '未设置时薪',
@@ -105,17 +94,6 @@ export function buildReviewCard(input: ReviewInput, generatedAt: string): Review
     schema_version: REVIEW_SCHEMA_VERSION,
     payload: buildReviewPayload(input),
   };
-}
-
-/** 按时间进度推算"此刻本该存到多少"，用于判断落后多少。 */
-function expectedProgressCents(goal: Goal, monthKey: string): number {
-  const created = Date.parse(goal.created_at.slice(0, 10));
-  const deadline = Date.parse(goal.deadline);
-  const [y, m] = monthKey.split('-').map(Number);
-  const monthEnd = new Date(y, m, 0).getTime();
-  if (!Number.isFinite(created) || !Number.isFinite(deadline) || deadline <= created) return goal.target_cents;
-  const ratio = Math.max(0, Math.min(1, (Math.min(monthEnd, deadline) - created) / (deadline - created)));
-  return Math.round(goal.target_cents * ratio);
 }
 
 /** 复盘卡在分享时的默认文案：**不含绝对金额**（PRD §4 M3 边界）。 */

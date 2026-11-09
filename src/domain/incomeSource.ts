@@ -1,5 +1,6 @@
 import type { Cents, Direction, Transaction } from '../types';
 import { normalizeText } from './classify';
+import { isVoidTx } from './voidTx';
 
 /**
  * 收入来源识别（工资 / 补贴）。
@@ -19,6 +20,24 @@ import { normalizeText } from './classify';
 
 export type IncomeSourceL1 = 'salary' | 'allowance';
 
+/**
+ * 可选的高级筛选条件。
+ *
+ * 为什么需要它：像「余额宝」这种大词会把转入、转出、收益、甚至已关闭的预约一起命中。
+ * 只给一个关键词输入框，用户要么不敢加，要么加了之后账目变脏。
+ * 这几个条件都是**可缺省**的，不填就回到原来的「含关键词就算」，不改变既有配置的行为。
+ */
+export interface IncomeSourceFilter {
+  /** 金额下限（分，含）：工资通常几千，用它挡掉同名的零星小额 */
+  min_cents?: number;
+  /** 金额上限（分，含） */
+  max_cents?: number;
+  /** 摘要（对方名 + 备注）必须包含的词，用来锁定「转入」「代发」这类动作 */
+  include?: string;
+  /** 摘要不能包含的词，用来排掉「转出」「收益」「关闭」这类同源不同义 */
+  exclude?: string;
+}
+
 /** 用户确认过的收入来源。 */
 export interface IncomeSource {
   /** 归一化后的匹配关键词（含它就判收入） */
@@ -27,6 +46,8 @@ export interface IncomeSource {
   label: string;
   l1: IncomeSourceL1;
   l2: string;
+  /** 可选的高级条件；缺省 = 只认关键词 */
+  filter?: IncomeSourceFilter;
 }
 
 const SALARY_HINTS = [
@@ -59,6 +80,8 @@ export interface DetectIncomeInput {
   direction: Direction;
   counterparty?: string;
   note?: string;
+  /** 金额（分），高级条件里的金额区间要用；不传则跳过区间判断 */
+  amount_cents?: Cents;
 }
 
 export interface IncomeDetection {
@@ -88,9 +111,11 @@ function haystack(counterparty: string | undefined, note: string | undefined): s
  * 内置词表判定：只用于**生成候选**，不参与入账改判。
  *
  * 已退款/冲正的行直接跳过：钱确实回来过，改判成收入会和退款冲减重复计算。
+ * 「交易关闭」的行也跳过：钱从头到尾没动过，它不是一笔收入，连候选都不该出现。
  */
 export function detectBuiltinIncome(input: DetectIncomeInput): IncomeDetection | null {
   if (input.direction === 'income' || input.direction === 'refund') return null;
+  if (isVoidTx(input)) return null;
   const hay = haystack(input.counterparty, input.note);
   if (!hay) return null;
   if (INCOME_EXCLUDE.some((word) => hay.includes(word))) return null;
@@ -114,10 +139,34 @@ export function detectBuiltinIncome(input: DetectIncomeInput): IncomeDetection |
 }
 
 /**
+ * 高级条件是否放行。没有 filter 就一律放行，行为与旧版一致。
+ *
+ * 金额未知（调用方没传 amount_cents）时跳过区间判断，而不是判失败：
+ * 条件全在文本侧时仍然该生效，不该因为一次调用忘了传金额就把收入丢掉。
+ */
+export function passesIncomeFilter(
+  filter: IncomeSourceFilter | undefined,
+  hay: string,
+  amount: number | undefined,
+): boolean {
+  if (!filter) return true;
+  if (amount !== undefined) {
+    if (filter.min_cents !== undefined && amount < filter.min_cents) return false;
+    if (filter.max_cents !== undefined && amount > filter.max_cents) return false;
+  }
+  const include = normalizeText(filter.include ?? '');
+  if (include && !hay.includes(include)) return false;
+  const exclude = normalizeText(filter.exclude ?? '');
+  if (exclude && hay.includes(exclude)) return false;
+  return true;
+}
+
+/**
  * 用户白名单判定：导入时真正决定方向的这一步。
  *
  * 与内置词表的区别是**只认用户勾过的关键词**，不做任何模糊猜测；
  * 排除词同样生效——用户勾了「XX公司」，账单里出现「XX公司-社保代扣」仍然不算收入。
+ * 「交易关闭」的行一律不认：钱没动过，关键词再精确也不是收入。
  */
 export function detectWhitelistedIncome(
   input: DetectIncomeInput,
@@ -125,6 +174,7 @@ export function detectWhitelistedIncome(
 ): IncomeDetection | null {
   if (input.direction === 'income' || input.direction === 'refund') return null;
   if (sources.length === 0) return null;
+  if (isVoidTx(input)) return null;
   const hay = haystack(input.counterparty, input.note);
   if (!hay) return null;
   if (INCOME_EXCLUDE.some((word) => hay.includes(word))) return null;
@@ -132,7 +182,10 @@ export function detectWhitelistedIncome(
   let bestLen = 0;
   for (const source of sources) {
     const needle = normalizeText(source.keyword);
-    if (needle && hay.includes(needle) && needle.length > bestLen) {
+    if (!needle || !hay.includes(needle)) continue;
+    // 关键词命中了还要过高级条件：金额区间对不上、缺必含词、含排除词都不算
+    if (!passesIncomeFilter(source.filter, hay, input.amount_cents)) continue;
+    if (needle.length > bestLen) {
       best = source;
       bestLen = needle.length;
     }

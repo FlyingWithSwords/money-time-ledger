@@ -45,6 +45,11 @@ export class LedgerDatabase extends Dexie {
   rules!: Table<CategoryRule, string>;
   holdings!: Table<Holding, string>;
   quotes!: Table<FundQuote, string>;
+  /**
+   * 储蓄目标（M4）已下线，功能由「消费计划」取代。
+   * 表保留不删：老备份里还有 goals 的行，删表会让那些备份在恢复时报错；
+   * 留着只是不再有写入方，也不参与任何计算。
+   */
   goals!: Table<Goal, string>;
   budgets!: Table<Budget, string>;
   batches!: Table<ImportBatch, string>;

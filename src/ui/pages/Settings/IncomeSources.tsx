@@ -1,9 +1,11 @@
+import TuneIcon from '@mui/icons-material/Tune';
 import {
   Alert,
   Box,
   Button,
   Checkbox,
   Chip,
+  Collapse,
   Divider,
   FormControl,
   InputLabel,
@@ -25,8 +27,9 @@ import {
   scanIncomeCandidates,
   type IncomeCandidate,
   type IncomeSource,
+  type IncomeSourceFilter,
 } from '../../../domain/incomeSource';
-import { formatCents } from '../../../domain/money';
+import { formatCents, sumCents, yuanToCents } from '../../../domain/money';
 import { useUiStore } from '../../../store/uiStore';
 import { SectionCard } from '../../components/SectionCard';
 
@@ -50,6 +53,47 @@ const L2_OPTIONS =
     { id: 'other', name: '其他工资' },
   ];
 
+interface FilterForm {
+  minYuan: string;
+  maxYuan: string;
+  include: string;
+  exclude: string;
+}
+
+/**
+ * 把填写中的高级条件收敛成对象；全空等于不设条件。
+ *
+ * 填错时要**报错而不是静默忽略**：静默忽略最坑人——用户以为加了「金额 ≥ 5000」，
+ * 实际规则是全放的，下次导入一笔 0.03 元的余额宝收益也会被算成工资。
+ */
+function parseFilter(form: FilterForm): { filter?: IncomeSourceFilter } | { error: string } {
+  const filter: IncomeSourceFilter = {};
+  const bounds: ReadonlyArray<[key: 'min_cents' | 'max_cents', raw: string, name: string]> = [
+    ['min_cents', form.minYuan, '金额下限'],
+    ['max_cents', form.maxYuan, '金额上限'],
+  ];
+  for (const [key, raw, name] of bounds) {
+    const text = raw.trim();
+    if (!text) continue;
+    let cents: number;
+    try {
+      cents = yuanToCents(text);
+    } catch {
+      return { error: `${name}填的不是金额：${text}` };
+    }
+    if (cents < 0) return { error: `${name}不能是负数` };
+    filter[key] = cents;
+  }
+  if (filter.min_cents !== undefined && filter.max_cents !== undefined && filter.min_cents > filter.max_cents) {
+    return { error: '金额下限比上限还大，这条规则永远不会命中' };
+  }
+  const include = form.include.trim();
+  if (include) filter.include = include;
+  const exclude = form.exclude.trim();
+  if (exclude) filter.exclude = exclude;
+  return Object.keys(filter).length > 0 ? { filter } : {};
+}
+
 export function IncomeSourcesPage(): JSX.Element {
   const navigate = useNavigate();
   const showSnack = useUiStore((state) => state.showSnack);
@@ -61,7 +105,20 @@ export function IncomeSourcesPage(): JSX.Element {
   /** 每行选中的二级分类，覆盖默认判断 */
   const [l2Overrides, setL2Overrides] = useState<Record<string, string>>({});
   const [manual, setManual] = useState('');
+  /** 高级条件：默认收起，避免把「加个关键词」这件小事变成填表。 */
+  const [advanced, setAdvanced] = useState(false);
+  const [minYuan, setMinYuan] = useState('');
+  const [maxYuan, setMaxYuan] = useState('');
+  const [include, setInclude] = useState('');
+  const [exclude, setExclude] = useState('');
   const [busy, setBusy] = useState(false);
+
+  /**
+   * 已经被记成收入、实为「交易关闭」的记录。
+   *
+   * 只修判定不修存量，用户那笔 15,000 会永远留在收入里。所以这里实时捞出来给他一键改回。
+   */
+  const voidIncome = useLiveQuery(() => transactionRepo.listVoidIncome(), [], []) ?? [];
 
   const scan = async (): Promise<void> => {
     if (busy) return;
@@ -125,13 +182,43 @@ export function IncomeSourcesPage(): JSX.Element {
   const addManual = async (): Promise<void> => {
     const keyword = manual.trim();
     if (!keyword) return;
+    const parsed = parseFilter({ minYuan, maxYuan, include, exclude });
+    if ('error' in parsed) {
+      showSnack({ message: parsed.error, severity: 'warning' });
+      return;
+    }
     setBusy(true);
     try {
-      await settingsRepo.setIncomeSources(
-        mergeIncomeSources(sources, [{ keyword, label: keyword, l1: 'salary', l2: 'monthly' }]),
-      );
+      const source: IncomeSource = { keyword, label: keyword, l1: 'salary', l2: 'monthly' };
+      if (parsed.filter) source.filter = parsed.filter;
+      await settingsRepo.setIncomeSources(mergeIncomeSources(sources, [source]));
       setManual('');
-      showSnack({ message: '已添加。之后导入的账单命中它就算收入', severity: 'success' });
+      setMinYuan('');
+      setMaxYuan('');
+      setInclude('');
+      setExclude('');
+      setAdvanced(false);
+      showSnack({
+        message: parsed.filter
+          ? '已添加。之后导入的记录要同时满足关键词与高级条件才算收入'
+          : '已添加。之后导入的账单命中它就算收入',
+        severity: 'success',
+      });
+    } catch (error) {
+      showSnack({ message: `操作失败：${describeError(error)}`, severity: 'error' });
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  /** 把已误判为收入的「交易关闭」记录改回不计收支。 */
+  const fixVoidIncome = async (): Promise<void> => {
+    if (busy || voidIncome.length === 0) return;
+    setBusy(true);
+    try {
+      const changed = await transactionRepo.revertVoidIncome(voidIncome.map((tx) => tx.id));
+      await settingsRepo.bumpDataVersion();
+      showSnack({ message: `已把 ${changed} 笔「交易关闭」的记录改回不计收支`, severity: 'success' });
     } catch (error) {
       showSnack({ message: `操作失败：${describeError(error)}`, severity: 'error' });
     } finally {
@@ -171,6 +258,29 @@ export function IncomeSourcesPage(): JSX.Element {
         在这里勾出哪些来源算收入，之后导入就自动按「工资补贴」入账。
       </Alert>
 
+      {voidIncome.length > 0 && (
+        /**
+         * 动作放在正文里而不是 Alert 的 action 位：手机上 action 只分到很窄一列，
+         * 文案和按钮互相挤，两边都读不清。放到正文下面一行，两个宽度都舒服。
+         */
+        <Alert severity="warning" sx={{ mb: 1.5 }}>
+          有 {voidIncome.length} 笔「交易关闭」的记录被算成了收入（合计{' '}
+          {formatCents(sumCents(voidIncome.map((tx) => tx.amount_cents)))}）。交易关闭说明钱从头到尾没动过，
+          它不算收入，也不该算支出。
+          <Box sx={{ mt: 1 }}>
+            <Button
+              size="small"
+              variant="outlined"
+              color="warning"
+              disabled={busy}
+              onClick={() => void fixVoidIncome()}
+            >
+              改回不计收支
+            </Button>
+          </Box>
+        </Alert>
+      )}
+
       <SectionCard title="已确认的来源" dense>
         {sources.length === 0 ? (
           <Typography variant="body2" color="text.secondary">
@@ -181,12 +291,19 @@ export function IncomeSourcesPage(): JSX.Element {
             {sources.map((source) => (
               <Chip
                 key={source.keyword}
-                label={`${source.label} · ${L2_OPTIONS.find((item) => item.id === source.l2)?.name ?? source.l2}`}
+                label={`${source.label} · ${L2_OPTIONS.find((item) => item.id === source.l2)?.name ?? source.l2}${
+                  source.filter ? ' · 有筛选' : ''
+                }`}
                 size="small"
                 onDelete={busy ? undefined : () => void removeSource(source.keyword)}
               />
             ))}
           </Stack>
+        )}
+        {sources.some((source) => source.filter) && (
+          <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mt: 1 }}>
+            标「有筛选」的来源，要同时满足你设的金额与摘要条件才算收入；条件不满足时按原样不入账。
+          </Typography>
         )}
         <Button size="small" sx={{ mt: 1 }} disabled={busy} onClick={() => void scan()}>
           {candidates === null ? '扫描历史记录' : '重新扫描'}
@@ -271,7 +388,7 @@ export function IncomeSourcesPage(): JSX.Element {
 
       <Box sx={{ mt: 1.5 }}>
         <SectionCard title="手动添加关键词" dense>
-          <Stack direction="row" spacing={1} alignItems="flex-start">
+          <Stack spacing={1}>
             <TextField
               size="small"
               label="对方名里的关键词"
@@ -281,12 +398,73 @@ export function IncomeSourcesPage(): JSX.Element {
               fullWidth
               InputLabelProps={{ shrink: true }}
             />
-            <Button variant="outlined" disabled={busy || !manual.trim()} onClick={() => void addManual()}>
-              添加
-            </Button>
+
+            <Box>
+              <Button
+                size="small"
+                startIcon={<TuneIcon fontSize="small" />}
+                onClick={() => setAdvanced((prev) => !prev)}
+              >
+                {advanced ? '收起高级条件' : '高级条件（可选）'}
+              </Button>
+              {/* unmountOnExit：收起时把输入框从 DOM 移除，否则它们仍留在 Tab 顺序里，
+                  Tab 会跳进一片看不见的输入框。 */}
+              <Collapse in={advanced} unmountOnExit>
+                <Stack spacing={1} sx={{ pt: 1 }}>
+                  <Stack direction={{ xs: 'column', sm: 'row' }} spacing={1}>
+                    <TextField
+                      size="small"
+                      label="金额不低于（元）"
+                      placeholder="例如：3000"
+                      value={minYuan}
+                      onChange={(event) => setMinYuan(event.target.value)}
+                      fullWidth
+                      InputLabelProps={{ shrink: true }}
+                      inputProps={{ inputMode: 'decimal' }}
+                    />
+                    <TextField
+                      size="small"
+                      label="金额不高于（元）"
+                      placeholder="留空表示不限"
+                      value={maxYuan}
+                      onChange={(event) => setMaxYuan(event.target.value)}
+                      fullWidth
+                      InputLabelProps={{ shrink: true }}
+                      inputProps={{ inputMode: 'decimal' }}
+                    />
+                  </Stack>
+                  <TextField
+                    size="small"
+                    label="摘要必须包含"
+                    placeholder="例如：转入 / 代发"
+                    value={include}
+                    onChange={(event) => setInclude(event.target.value)}
+                    fullWidth
+                    InputLabelProps={{ shrink: true }}
+                  />
+                  <TextField
+                    size="small"
+                    label="摘要不能包含"
+                    placeholder="例如：转出 / 收益"
+                    value={exclude}
+                    onChange={(event) => setExclude(event.target.value)}
+                    fullWidth
+                    InputLabelProps={{ shrink: true }}
+                  />
+                </Stack>
+              </Collapse>
+            </Box>
+
+            <Box>
+              <Button variant="outlined" disabled={busy || !manual.trim()} onClick={() => void addManual()}>
+                添加
+              </Button>
+            </Box>
           </Stack>
+
           <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mt: 1 }}>
-            只影响之后导入的账单，不改动已有记录。含「社保 / 公积金 / 个税」的行永远不会被算成收入。
+            只影响之后导入的账单，不改动已有记录。「摘要」指对方名加备注。
+            「交易关闭」的记录永远不会被算成收入，不用自己排除。含「社保 / 公积金 / 个税」的行同理。
           </Typography>
         </SectionCard>
       </Box>

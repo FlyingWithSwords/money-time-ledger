@@ -6,6 +6,7 @@ import {
   scanIncomeCandidates,
   type IncomeSource,
 } from '../domain/incomeSource';
+import type { Cents } from '../types';
 import { makeTx } from './txFixture';
 
 const WAGE: IncomeSource = { keyword: 'xx科技有限公司', label: 'XX科技有限公司', l1: 'salary', l2: 'monthly' };
@@ -160,5 +161,140 @@ describe('白名单合并', () => {
   it('不同关键词都保留，且关键词统一归一化', () => {
     const merged = mergeIncomeSources([WAGE], [SUBSIDY, { ...SUBSIDY, keyword: ' 交 通 补 ' }]);
     expect(merged.map((item) => item.keyword).sort()).toEqual(['交通补', 'xx科技有限公司', '餐补'].sort());
+  });
+});
+
+/**
+ * 真实故障复现：用户在收入来源里加了「余额宝」，一笔
+ * 「余额宝-单次转入（交易关闭）」的 15,000 元被改判成收入，账上凭空多出一笔进账。
+ * 交易关闭 = 下单后没付款/被取消，钱从头到尾没动过。
+ */
+const YUEBAO: IncomeSource = { keyword: '余额宝', label: '余额宝', l1: 'salary', l2: 'monthly' };
+
+describe('交易关闭：钱没动过的记录不算收入', () => {
+  const closed = {
+    direction: 'transfer' as const,
+    counterparty: '余额宝',
+    note: '余额宝-单次转入（交易关闭）',
+    amount_cents: 1500000 as Cents,
+  };
+
+  it('「余额宝」已加成收入来源，关闭的那笔也不会被改判', () => {
+    expect(detectWhitelistedIncome(closed, [YUEBAO])).toBeNull();
+  });
+
+  it('同一来源的正常转入仍然算收入——排除的只是关闭交易，不是整个来源', () => {
+    const hit = detectWhitelistedIncome({ ...closed, note: '余额宝-单次转入' }, [YUEBAO]);
+    expect(hit?.by).toBe('whitelist');
+    expect(hit?.l2).toBe('monthly');
+  });
+
+  it('内置词表也不把这类的记录当候选：连勾选的机会都不给', () => {
+    expect(
+      detectBuiltinIncome({ direction: 'transfer', counterparty: '公司', note: '工资（交易关闭）' }),
+    ).toBeNull();
+  });
+
+  it('扫描历史记录时不出现，避免用户顺手勾中', () => {
+    const txs = [
+      makeTx({
+        id: 'closed',
+        at: '2026-10-10T09:00:00+08:00',
+        amount: 1500000,
+        direction: 'transfer',
+        counterparty: '余额宝',
+        note: '余额宝-单次转入（交易关闭）',
+      }),
+    ];
+    expect(scanIncomeCandidates(txs)).toHaveLength(0);
+  });
+
+  it.each(['交易取消', '交易已取消', '交易失败', '支付失败', '交易已关闭'])(
+    '其他平台写法同样认：%s',
+    (status) => {
+      expect(
+        detectWhitelistedIncome(
+          { direction: 'transfer', counterparty: '余额宝', note: `余额宝-单次转入（${status}）` },
+          [YUEBAO],
+        ),
+      ).toBeNull();
+    },
+  );
+});
+
+describe('高级条件：满足才认，不满足按原样不入账', () => {
+  const source = (filter: IncomeSource['filter']): IncomeSource => ({ ...YUEBAO, filter });
+
+  it('没设条件时行为与以前完全一致', () => {
+    expect(
+      detectWhitelistedIncome(
+        { direction: 'transfer', counterparty: '余额宝', note: '收益发放', amount_cents: 3 as Cents },
+        [YUEBAO],
+      ),
+    ).not.toBeNull();
+  });
+
+  it('金额下限挡掉同名小额：3 分钱的余额宝收益不该算工资', () => {
+    const rule = source({ min_cents: 100000 });
+    expect(
+      detectWhitelistedIncome(
+        { direction: 'transfer', counterparty: '余额宝', note: '收益发放', amount_cents: 3 as Cents },
+        [rule],
+      ),
+    ).toBeNull();
+    expect(
+      detectWhitelistedIncome(
+        { direction: 'transfer', counterparty: '余额宝', note: '单次转入', amount_cents: 1500000 as Cents },
+        [rule],
+      ),
+    ).not.toBeNull();
+  });
+
+  it('金额上限同样生效', () => {
+    const rule = source({ max_cents: 100000 });
+    expect(
+      detectWhitelistedIncome(
+        { direction: 'transfer', counterparty: '余额宝', note: '单次转入', amount_cents: 1500000 as Cents },
+        [rule],
+      ),
+    ).toBeNull();
+  });
+
+  it('「必须包含」把方向钉死：转入算，转出不算', () => {
+    const rule = source({ include: '转入' });
+    expect(
+      detectWhitelistedIncome({ direction: 'transfer', counterparty: '余额宝', note: '单次转出' }, [rule]),
+    ).toBeNull();
+    expect(
+      detectWhitelistedIncome({ direction: 'transfer', counterparty: '余额宝', note: '单次转入' }, [rule]),
+    ).not.toBeNull();
+  });
+
+  it('「不能包含」排掉同源不同义', () => {
+    const rule = source({ exclude: '转出' });
+    expect(
+      detectWhitelistedIncome({ direction: 'transfer', counterparty: '余额宝', note: '单次转出' }, [rule]),
+    ).toBeNull();
+    expect(
+      detectWhitelistedIncome({ direction: 'transfer', counterparty: '余额宝', note: '收益发放' }, [rule]),
+    ).not.toBeNull();
+  });
+
+  it('金额与文本条件同时生效，缺一不算', () => {
+    const rule = source({ min_cents: 100000, include: '转入' });
+    const hit = (amount: number, note: string): unknown =>
+      detectWhitelistedIncome(
+        { direction: 'transfer', counterparty: '余额宝', note, amount_cents: amount as Cents },
+        [rule],
+      );
+    expect(hit(1500000, '单次转入')).not.toBeNull();
+    expect(hit(50000, '单次转入')).toBeNull();
+    expect(hit(1500000, '单次转出')).toBeNull();
+  });
+
+  it('调用方没传金额时跳过区间判断，文本条件仍生效', () => {
+    const rule = source({ min_cents: 100000, include: '转入' });
+    expect(detectWhitelistedIncome({ direction: 'transfer', counterparty: '余额宝', note: '单次转入' }, [rule])).not.toBeNull();
+    expect(detectWhitelistedIncome({ direction: 'transfer', counterparty: '余额宝', note: '单次转出' }, [rule])).toBeNull();
   });
 });

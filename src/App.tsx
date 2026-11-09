@@ -16,7 +16,6 @@ import { IncomeSourcesPage } from './ui/pages/Settings/IncomeSources';
 import { CategoriesPage } from './ui/pages/Settings/Categories';
 import { RulesPage } from './ui/pages/Settings/Rules';
 import { BackupPage } from './ui/pages/Settings/Backup';
-import { GoalsPage } from './ui/pages/Settings/Goals';
 import { PrivacyPage } from './ui/pages/Settings/Privacy';
 import { ReviewPage } from './ui/pages/Review';
 import { ReconcilePage } from './ui/pages/Reconcile';
@@ -46,7 +45,6 @@ const router = createHashRouter([
       { path: 'settings/rules', element: <RulesPage /> },
       { path: 'settings/backup', element: <BackupPage /> },
       { path: 'settings/ai', element: <AiExportPage /> },
-      { path: 'settings/goals', element: <GoalsPage /> },
       { path: 'settings/privacy', element: <PrivacyPage /> },
       { path: 'review/:monthKey', element: <ReviewPage /> },
     ],
